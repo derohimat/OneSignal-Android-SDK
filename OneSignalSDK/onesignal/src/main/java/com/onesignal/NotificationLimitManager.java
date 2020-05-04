@@ -9,6 +9,7 @@ import android.os.Build;
 import android.service.notification.StatusBarNotification;
 import android.support.annotation.RequiresApi;
 
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.SortedMap;
 import java.util.TreeMap;
@@ -39,15 +40,13 @@ class NotificationLimitManager {
    // Used to cancel the oldest notifications to make room for new notifications we are about to display
    // If we don't make this room users will NOT be alerted of new notifications for the app.
    static void clearOldestOverLimit(Context context, int notifsToMakeRoomFor) {
-      System.out.println("getMaxNumberOfNotificationsInt(): " + getMaxNumberOfNotificationsInt());
-
       try {
          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
             clearOldestOverLimitStandard(context, notifsToMakeRoomFor);
          else
             clearOldestOverLimitFallback(context, notifsToMakeRoomFor);
       } catch(Throwable t) {
-         // try-catch for Android 6.0.X bug work around, getActiveNotifications bug
+         // try-catch for Android 6.0.X and possibly 8.0.0 bug work around, getActiveNotifications bug
          clearOldestOverLimitFallback(context, notifsToMakeRoomFor);
       }
    }
@@ -56,8 +55,7 @@ class NotificationLimitManager {
    // This could be any notification, not just a OneSignal notification
    @RequiresApi(api = Build.VERSION_CODES.M)
    static void clearOldestOverLimitStandard(Context context, int notifsToMakeRoomFor) throws Throwable {
-      NotificationManager notifManager = (NotificationManager)context.getSystemService(Context.NOTIFICATION_SERVICE);
-      StatusBarNotification[] activeNotifs = notifManager.getActiveNotifications();
+      StatusBarNotification[] activeNotifs = OneSignalNotificationManager.getActiveNotifications(context);
 
       int notifsToClear = (activeNotifs.length - getMaxNumberOfNotificationsInt()) + notifsToMakeRoomFor;
       // We have enough room in the notification shade, no need to clear any notifications
@@ -90,7 +88,7 @@ class NotificationLimitManager {
          cursor = readableDb.query(
             NotificationTable.TABLE_NAME,
             new String[] { NotificationTable.COLUMN_NAME_ANDROID_NOTIFICATION_ID },
-            NotificationTable.recentUninteractedWithNotificationsWhere().toString(),
+            OneSignalDbHelper.recentUninteractedWithNotificationsWhere().toString(),
             null,
             null,
             null,

@@ -4,8 +4,10 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
 
-import com.onesignal.BuildConfig;
 import com.onesignal.OneSignal;
+import com.onesignal.OneSignalPackagePrivateHelper.OneSignalPrefs;
+import com.onesignal.StaticResetHelper;
+import com.onesignal.example.BlankActivity;
 
 import org.junit.AfterClass;
 import org.junit.Before;
@@ -18,23 +20,19 @@ import org.robolectric.android.controller.ActivityController;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowLog;
 
-import com.onesignal.OneSignalPackagePrivateHelper.OneSignalPrefs;
-import com.onesignal.StaticResetHelper;
-import com.onesignal.example.BlankActivity;
-
-import static com.onesignal.OneSignalPackagePrivateHelper.OneSignal_setAppContext;
 import static org.junit.Assert.assertEquals;
 
 @Config(packageName = "com.onesignal.example",
-   constants = BuildConfig.class,
-   instrumentedPackages = {"com.onesignal"},
-   sdk = 21)
+        instrumentedPackages = { "com.onesignal" },
+        sdk = 21
+)
+
 @RunWith(RobolectricTestRunner.class)
 public class OneSignalPrefsRunner {
    private static Activity blankActivity;
 
    @BeforeClass // Runs only once, before any tests
-   public static void setUpClass() {
+   public static void setUpClass() throws Exception {
       ShadowLog.stream = System.out;
       TestHelpers.beforeTestSuite();
       StaticResetHelper.saveStaticValues();
@@ -48,26 +46,26 @@ public class OneSignalPrefsRunner {
    }
 
    @AfterClass
-   public static void afterEverything() {
+   public static void afterEverything() throws Exception {
       StaticResetHelper.restSetStaticFields();
    }
 
    @Test
-   public void testNullContextDoesNotCrash() throws Exception {
+   public void testNullContextDoesNotCrash() {
       OneSignalPrefs.saveString(OneSignalPrefs.PREFS_ONESIGNAL,"key", "value");
       TestHelpers.flushBufferedSharedPrefs();
    }
 
    @Test
-   public void tesWriteWithNullContextAndSavesAfterSetting() throws Exception {
+   public void tesWriteWithNullContextAndSavesAfterSetting() {
       OneSignalPrefs.saveString(OneSignalPrefs.PREFS_ONESIGNAL,"key", "value");
       TestHelpers.flushBufferedSharedPrefs();
 
-      OneSignal_setAppContext(blankActivity);
+      OneSignal.setAppContext(blankActivity);
       TestHelpers.flushBufferedSharedPrefs();
 
       final SharedPreferences prefs = blankActivity.getSharedPreferences(OneSignalPrefs.PREFS_ONESIGNAL, Context.MODE_PRIVATE);
       String value = prefs.getString("key", "");
-      assertEquals(value, "value");
+      assertEquals("value", value);
    }
 }

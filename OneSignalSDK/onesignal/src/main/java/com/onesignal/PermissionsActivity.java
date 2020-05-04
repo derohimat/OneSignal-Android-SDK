@@ -32,12 +32,17 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
 import android.support.annotation.NonNull;
 
 import com.onesignal.AndroidSupportV4Compat.ActivityCompat;
 
 public class PermissionsActivity extends Activity {
 
+   private static final String TAG = PermissionsActivity.class.getCanonicalName();
+   // TODO this will be removed once the handled is deleted
+   // Default animation duration in milliseconds
+   private static final int DELAY_TIME_CALLBACK_CALL = 500;
    private static final int REQUEST_LOCATION = 2;
 
    static boolean waiting, answered;
@@ -63,7 +68,7 @@ public class PermissionsActivity extends Activity {
    protected void onNewIntent(Intent intent) {
       super.onNewIntent(intent);
 
-      if (OneSignal.initDone)
+      if (OneSignal.isInitDone())
          requestPermission();
    }
 
@@ -72,6 +77,7 @@ public class PermissionsActivity extends Activity {
       // Activity maybe invoked directly through automated testing, omit prompting on old Android versions.
       if (Build.VERSION.SDK_INT < 23) {
          finish();
+         overridePendingTransition(R.anim.onesignal_fade_in, R.anim.onesignal_fade_out);
          return;
       }
 
@@ -82,19 +88,32 @@ public class PermissionsActivity extends Activity {
    }
 
    @Override
-   public void onRequestPermissionsResult(int requestCode, @NonNull String permissions[], @NonNull int[] grantResults) {
+   public void onRequestPermissionsResult(final int requestCode, @NonNull String permissions[], @NonNull final int[] grantResults) {
       answered = true;
       waiting = false;
 
+      // TODO improve this method
+      // TODO after we remove IAM from being an activity window we may be able to remove this handler
+      // This is not a good solution!
+      // Current problem: IAM depends on an activity, because of prompt permission the evaluation of IAM
+      // is being called before the prompt activity dismisses, so it's attaching the IAM to PermissionActivity
+      // We need to wait for other activity to show
       if (requestCode == REQUEST_LOCATION) {
-         if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED)
-            LocationGMS.startGetLocation();
-         else
-            LocationGMS.fireFailedComplete();
+         new Handler().postDelayed(new Runnable() {
+            @Override
+            public void run() {
+               boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+               LocationGMS.sendAndClearPromptHandlers(true, granted);
+               if (granted)
+                  LocationGMS.startGetLocation();
+               else
+                  LocationGMS.fireFailedComplete();
+            }
+         }, DELAY_TIME_CALLBACK_CALL);
       }
-
-      ActivityLifecycleHandler.removeActivityAvailableListener(activityAvailableListener);
+      ActivityLifecycleHandler.removeActivityAvailableListener(TAG);
       finish();
+      overridePendingTransition(R.anim.onesignal_fade_in, R.anim.onesignal_fade_out);
    }
 
 
@@ -104,15 +123,16 @@ public class PermissionsActivity extends Activity {
 
       activityAvailableListener = new ActivityLifecycleHandler.ActivityAvailableListener() {
          @Override
-         public void available(Activity activity) {
+         public void available(@NonNull Activity activity) {
             if (!activity.getClass().equals(PermissionsActivity.class)) {
                Intent intent = new Intent(activity, PermissionsActivity.class);
                intent.setFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
                activity.startActivity(intent);
+               activity.overridePendingTransition(R.anim.onesignal_fade_in, R.anim.onesignal_fade_out);
             }
          }
       };
 
-      ActivityLifecycleHandler.setActivityAvailableListener(activityAvailableListener);
+      ActivityLifecycleHandler.setActivityAvailableListener(TAG, activityAvailableListener);
    }
 }

@@ -30,7 +30,6 @@ package com.test.onesignal;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlarmManager;
-import android.app.job.JobScheduler;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -41,9 +40,8 @@ import android.database.sqlite.SQLiteDatabase;
 import android.location.Location;
 import android.net.ConnectivityManager;
 import android.os.Bundle;
-import android.util.Log;
 
-import com.onesignal.BuildConfig;
+import com.onesignal.MockOutcomesUtils;
 import com.onesignal.OSEmailSubscriptionObserver;
 import com.onesignal.OSEmailSubscriptionState;
 import com.onesignal.OSEmailSubscriptionStateChanges;
@@ -57,15 +55,19 @@ import com.onesignal.OSPermissionSubscriptionState;
 import com.onesignal.OSSubscriptionObserver;
 import com.onesignal.OSSubscriptionStateChanges;
 import com.onesignal.OneSignal;
+import com.onesignal.OneSignal.ChangeTagsUpdateHandler;
 import com.onesignal.OneSignalDbHelper;
+import com.onesignal.OneSignalPackagePrivateHelper;
+import com.onesignal.OneSignalShadowPackageManager;
+import com.onesignal.PermissionsActivity;
 import com.onesignal.ShadowAdvertisingIdProviderGPS;
 import com.onesignal.ShadowBadgeCountUpdater;
 import com.onesignal.ShadowCustomTabsClient;
 import com.onesignal.ShadowCustomTabsSession;
 import com.onesignal.ShadowFirebaseAnalytics;
+import com.onesignal.ShadowFusedLocationApiWrapper;
 import com.onesignal.ShadowGoogleApiClientBuilder;
 import com.onesignal.ShadowGoogleApiClientCompatProxy;
-import com.onesignal.ShadowFusedLocationApiWrapper;
 import com.onesignal.ShadowJobService;
 import com.onesignal.ShadowLocationGMS;
 import com.onesignal.ShadowLocationUpdateListener;
@@ -73,14 +75,14 @@ import com.onesignal.ShadowNotificationManagerCompat;
 import com.onesignal.ShadowOSUtils;
 import com.onesignal.ShadowOneSignal;
 import com.onesignal.ShadowOneSignalRestClient;
-import com.onesignal.OneSignalPackagePrivateHelper;
+import com.onesignal.ShadowPushRegistratorADM;
 import com.onesignal.ShadowPushRegistratorGCM;
 import com.onesignal.ShadowRoboNotificationManager;
 import com.onesignal.StaticResetHelper;
 import com.onesignal.SyncJobService;
 import com.onesignal.SyncService;
 import com.onesignal.example.BlankActivity;
-import com.onesignal.OneSignal.ChangeTagsUpdateHandler;
+import com.onesignal.example.MainActivity;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -93,13 +95,12 @@ import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
+import org.robolectric.android.controller.ActivityController;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowAlarmManager;
 import org.robolectric.shadows.ShadowApplication;
 import org.robolectric.shadows.ShadowConnectivityManager;
 import org.robolectric.shadows.ShadowLog;
-import org.robolectric.shadows.ShadowSystemClock;
-import org.robolectric.android.controller.ActivityController;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -108,60 +109,76 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 
 import static com.onesignal.OneSignalPackagePrivateHelper.GcmBroadcastReceiver_processBundle;
 import static com.onesignal.OneSignalPackagePrivateHelper.NotificationBundleProcessor_Process;
 import static com.onesignal.OneSignalPackagePrivateHelper.NotificationOpenedProcessor_processFromContext;
+import static com.onesignal.OneSignalPackagePrivateHelper.OneSignal_setAppId;
 import static com.onesignal.OneSignalPackagePrivateHelper.bundleAsJSONObject;
+import static com.onesignal.ShadowOneSignalRestClient.REST_METHOD;
 import static com.test.onesignal.GenerateNotificationRunner.getBaseNotifBundle;
-
+import static com.test.onesignal.RestClientAsserts.assertAmazonPlayerCreateAtIndex;
+import static com.test.onesignal.RestClientAsserts.assertAndroidPlayerCreateAtIndex;
+import static com.test.onesignal.RestClientAsserts.assertOnFocusAtIndex;
+import static com.test.onesignal.RestClientAsserts.assertOnFocusAtIndexDoesNotHaveKeys;
+import static com.test.onesignal.RestClientAsserts.assertOnSessionAtIndex;
+import static com.test.onesignal.RestClientAsserts.assertPlayerCreatePushAtIndex;
+import static com.test.onesignal.RestClientAsserts.assertRemoteParamsAtIndex;
+import static com.test.onesignal.RestClientAsserts.assertRestCalls;
+import static com.test.onesignal.TestHelpers.advanceSystemTimeBy;
 import static com.test.onesignal.TestHelpers.afterTestCleanup;
-import static com.test.onesignal.TestHelpers.fastAppRestart;
+import static com.test.onesignal.TestHelpers.fastColdRestartApp;
 import static com.test.onesignal.TestHelpers.flushBufferedSharedPrefs;
+import static com.test.onesignal.TestHelpers.getNextJob;
+import static com.test.onesignal.TestHelpers.restartAppAndElapseTimeToNextSession;
+import static com.test.onesignal.TestHelpers.runNextJob;
+import static com.test.onesignal.TestHelpers.threadAndTaskWait;
 import static junit.framework.Assert.assertEquals;
 import static junit.framework.Assert.assertFalse;
 import static junit.framework.Assert.assertNotNull;
 import static junit.framework.Assert.assertNull;
 import static junit.framework.Assert.assertTrue;
-
-import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.not;
-import static org.hamcrest.core.Is.is;
-
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertThat;
-
 import static org.robolectric.Shadows.shadowOf;
 
-import static com.onesignal.ShadowOneSignalRestClient.REST_METHOD;
-
 @Config(packageName = "com.onesignal.example",
+        instrumentedPackages = { "com.onesignal" },
         shadows = {
-           ShadowOneSignalRestClient.class,
-           ShadowPushRegistratorGCM.class,
-           ShadowOSUtils.class,
-           ShadowAdvertisingIdProviderGPS.class,
-           ShadowCustomTabsClient.class,
-           ShadowCustomTabsSession.class,
-           ShadowNotificationManagerCompat.class,
-           ShadowJobService.class
+            ShadowOneSignalRestClient.class,
+            ShadowPushRegistratorADM.class,
+            ShadowPushRegistratorGCM.class,
+            ShadowOSUtils.class,
+            ShadowAdvertisingIdProviderGPS.class,
+            ShadowCustomTabsClient.class,
+            ShadowCustomTabsSession.class,
+            ShadowNotificationManagerCompat.class,
+            ShadowJobService.class,
+            OneSignalShadowPackageManager.class
         },
-        instrumentedPackages = {"com.onesignal"},
-        constants = BuildConfig.class,
-        sdk = 21)
+        sdk = 21
+)
+
 @RunWith(RobolectricTestRunner.class)
 // Enable to ensure test order to consistency debug flaky test.
 // @FixMethodOrder(MethodSorters.NAME_ASCENDING)
 public class MainOneSignalClassRunner {
 
    private static final String ONESIGNAL_APP_ID = "b2f7f966-d8cc-11e4-bed1-df8f05be55ba";
+   private static final String ONESIGNAL_NOTIFICATION_ID = "97d8e764-81c2-49b0-a644-713d052ae7d5";
    @SuppressLint("StaticFieldLeak")
    private static Activity blankActivity;
    private static String callBackUseId, getCallBackRegId;
    private static String notificationOpenedMessage;
    private static JSONObject lastGetTags;
    private static ActivityController<BlankActivity> blankActivityController;
-   
+   private MockOutcomesUtils notificationData;
+
    private static void GetIdsAvailable() {
       OneSignal.idsAvailable(new OneSignal.IdsAvailableHandler() {
          @Override
@@ -181,6 +198,16 @@ public class MainOneSignalClassRunner {
       };
    }
 
+   private static JSONObject lastExternalUserIdResponse;
+   private static OneSignal.OSExternalUserIdUpdateCompletionHandler getExternalUserIdUpdateCompletionHandler() {
+      return new OneSignal.OSExternalUserIdUpdateCompletionHandler() {
+         @Override
+         public void onComplete(JSONObject results) {
+            lastExternalUserIdResponse = results;
+         }
+      };
+   }
+
    private static void GetTags() {
       OneSignal.getTags(new OneSignal.GetTagsHandler() {
          @Override
@@ -190,11 +217,12 @@ public class MainOneSignalClassRunner {
       });
    }
 
-   private static void cleanUp() {
+   private static void cleanUp() throws Exception {
       callBackUseId = getCallBackRegId = null;
 
       notificationOpenedMessage = null;
       lastGetTags = null;
+      lastExternalUserIdResponse = null;
 
       TestHelpers.beforeTestInitAndCleanup();
    }
@@ -216,26 +244,28 @@ public class MainOneSignalClassRunner {
    public void beforeEachTest() throws Exception {
       blankActivityController = Robolectric.buildActivity(BlankActivity.class).create();
       blankActivity = blankActivityController.get();
+      notificationData = new MockOutcomesUtils();
 
       cleanUp();
    }
 
    @After
    public void afterEachTest() throws Exception {
+      notificationData.clearNotificationSharedPreferences();
       afterTestCleanup();
    }
 
    @AfterClass
-   public static void afterEverything() {
+   public static void afterEverything() throws Exception {
       cleanUp();
    }
-
 
    @Test
    public void testInitFromApplicationContext() throws Exception {
       // Application.onCreate
       OneSignal.init(RuntimeEnvironment.application, "123456789", ONESIGNAL_APP_ID);
       threadAndTaskWait();
+      // Testing we still register the user in the background if this is the first time. (Note Context is application)
       assertNotNull(ShadowOneSignalRestClient.lastPost);
 
       ShadowOneSignalRestClient.lastPost = null;
@@ -253,9 +283,423 @@ public class MainOneSignalClassRunner {
    }
 
    @Test
+   public void testDeviceTypeIsAndroid_forPlayerCreate() throws Exception {
+      // 1. Init OneSignal so the app id is cached
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // 2. Make sure device_type is Android (1) in player create
+      assertAndroidPlayerCreateAtIndex(1);
+   }
+
+   @Test
+   public void testDeviceTypeIsAmazon_forPlayerCreate() throws Exception {
+      // 1. Mock Amazon device type for this test
+      ShadowOSUtils.mockAmazonDevice();
+
+      // 2. Init OneSignal so the app id is cached
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // 3. Make sure device_type is Amazon (2) in player create
+      assertAmazonPlayerCreateAtIndex(1);
+   }
+
+   @Test
+   public void testDeviceTypeIsAndroid_withoutOneSignalInit() throws Exception {
+      // 1. Init OneSignal so the app id is cached
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // 2. Background app
+      blankActivityController.pause();
+      threadAndTaskWait();
+
+      // 3. Restart OneSignal and clear the ShadowPushRegistratorADM statics
+      restartAppAndElapseTimeToNextSession();
+      threadAndTaskWait();
+
+      // 4. Set OneSignal.appId and context simulating a background sync doing so
+      OneSignal.setAppContext(blankActivity.getApplicationContext());
+      OneSignal_setAppId(ONESIGNAL_APP_ID);
+
+      // 5. Foreground app and trigger new session
+      blankActivityController.resume();
+      threadAndTaskWait();
+
+      // 6. Make sure device_type is Android (1) in player create and on_session
+      assertAndroidPlayerCreateAtIndex(1);
+      assertOnSessionAtIndex(3);
+   }
+
+   @Test
+   public void testDeviceTypeIsAmazon_withoutOneSignalInit() throws Exception {
+      // 1. Mock Amazon device type for this test
+      ShadowOSUtils.mockAmazonDevice();
+
+      // 2. Init OneSignal so the app id is cached
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // 3. Background the app
+      blankActivityController.pause();
+      threadAndTaskWait();
+
+      // 4. Restart the entire OneSignal and clear the ShadowPushRegistratorADM statics
+      restartAppAndElapseTimeToNextSession();
+      threadAndTaskWait();
+
+      // 5. Set OneSignal.appId and context simulating a background sync doing so
+      OneSignal.setAppContext(blankActivity.getApplicationContext());
+      OneSignal_setAppId(ONESIGNAL_APP_ID);
+
+      // 6. Foreground app and trigger new session
+      blankActivityController.resume();
+      threadAndTaskWait();
+
+      // 7. Make sure device_type is Android (1) in player create and on_session
+      assertAmazonPlayerCreateAtIndex(1);
+      assertOnSessionAtIndex(3);
+   }
+
+   /**
+    * 1. User opens app to MainActivity
+    * 2. Comparison of MainActivity to dummy PermissionsActivity (1st Test Case)
+    * 3. User gives privacy consent and LocationGMS prompt is shown with PermissionsActivity
+    * 4. Comparison of PermissionsActivity to dummy PermissionsActivity (2nd Test Case)
+    */
+   @Test
+   @Config(sdk = 26)
+   public void testLocationPermissionPromptWithPrivacyConsent() throws Exception {
+      OneSignal.setRequiresUserPrivacyConsent(true);
+      OneSignal.getCurrentOrNewInitBuilder().autoPromptLocation(true);
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // Create a dummy PermissionsActivity to compare in the test cases
+      Intent expectedActivity = new Intent(RuntimeEnvironment.application, PermissionsActivity.class);
+
+      /* Without showing the LocationGMS prompt we check to see that the current
+       * activity is not equal to PermissionsActivity since it is not showing yet */
+      Intent actualActivity = shadowOf(blankActivity).getNextStartedActivity();
+      // Assert false that the current activity is equal to the dummy PermissionsActivity
+      assertFalse(actualActivity.filterEquals(expectedActivity));
+
+      // Now we trigger the LocationGMS but providing consent to OneSignal SDK
+      OneSignal.provideUserConsent(true);
+      threadAndTaskWait();
+
+      // Now the PermissionsActivity should be the next on the stack
+      actualActivity = shadowOf(blankActivity).getNextStartedActivity();
+      // Assert true that the current activity is equal to the dummy PermissionsActivity
+      assertTrue(actualActivity.filterEquals(expectedActivity));
+   }
+
+   @Test
+   public void testAppFocusWithPrivacyConsent() throws Exception {
+      OneSignal.setRequiresUserPrivacyConsent(true);
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // Make sure onAppFocus does not move past privacy consent check and on_session is not called
+      blankActivityController.pause();
+      threadAndTaskWait();
+      advanceSystemTimeBy(31);
+
+      blankActivityController.resume();
+      threadAndTaskWait();
+
+      // No requests should be made at this point since privacy consent has not been given
+      int requestsCount = ShadowOneSignalRestClient.requests.size();
+      assertEquals(requestsCount, 0);
+
+      // Give privacy consent
+      OneSignal.provideUserConsent(true);
+
+      // Pause app and wait enough time to trigger on_session
+      blankActivityController.pause();
+      threadAndTaskWait();
+      advanceSystemTimeBy(31);
+
+      // Call onAppFocus and check that the last url is a on_session request
+      blankActivityController.resume();
+      threadAndTaskWait();
+
+      assertTrue(ShadowOneSignalRestClient.lastUrl.matches("players/.*/on_session"));
+   }
+
+   @Test
+   public void testAppOnFocusAfterOnSessionCall() throws Exception {
+      OneSignalInit();
+      threadAndTaskWait();
+
+      blankActivityController.pause();
+      threadAndTaskWait();
+      advanceSystemTimeBy(60);
+
+      blankActivityController.resume();
+      threadAndTaskWait();
+
+      assertTrue(ShadowOneSignalRestClient.lastUrl.matches("players/.*/on_session"));
+
+      // TODO: This is advancing by 60 seconds! Need to make a helper to increaseBy!
+      advanceSystemTimeBy(61);
+
+      blankActivityController.pause();
+      threadAndTaskWait();
+      assertTrue(ShadowOneSignalRestClient.lastUrl.matches("players/.*/on_focus"));
+      assertEquals(61, ShadowOneSignalRestClient.lastPost.getInt("active_time"));
+   }
+
+   @Test
+   public void testAppOnFocusAfterOnSessionCallFail() throws Exception {
+      OneSignalInit();
+      threadAndTaskWait();
+
+      blankActivityController.pause();
+      threadAndTaskWait();
+      advanceSystemTimeBy(60);
+
+      blankActivityController.resume();
+      threadAndTaskWait();
+
+      assertTrue(ShadowOneSignalRestClient.lastUrl.matches("players/.*/on_session"));
+      ShadowOneSignalRestClient.lastUrl = null;
+
+      advanceSystemTimeBy(59);
+
+      blankActivityController.pause();
+      threadAndTaskWait();
+      assertNull(ShadowOneSignalRestClient.lastUrl);
+   }
+
+   @Test
+   public void testAppOnFocusNeededAfterOnSessionCall() throws Exception {
+      OneSignalInit();
+      threadAndTaskWait();
+
+      blankActivityController.pause();
+      threadAndTaskWait();
+      advanceSystemTimeBy(31);
+
+      notificationData.markLastNotificationReceived("notification_id");
+      blankActivityController.resume();
+      threadAndTaskWait();
+
+      assertTrue(ShadowOneSignalRestClient.lastUrl.matches("players/.*/on_session"));
+
+      OneSignalPackagePrivateHelper.RemoteOutcomeParams params = new OneSignalPackagePrivateHelper.RemoteOutcomeParams();
+
+      notificationData.saveOutcomesParams(params);
+      advanceSystemTimeBy(61);
+
+      blankActivityController.pause();
+      threadAndTaskWait();
+
+      // A sync job should have been schedule, lets run it to ensure on_focus is called.
+      TestHelpers.runNextJob();
+      threadAndTaskWait();
+
+      assertOnFocusAtIndex(3, new JSONObject() {{
+         put("active_time", 61);
+         put("direct", false);
+         put("notification_ids", new JSONArray().put("notification_id"));
+      }});
+   }
+
+   @Test
+   public void testAppOnFocus_containsOutcomeData_withOutcomeEventFlagsEnabled() throws Exception {
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // Disable all outcome flags
+      OneSignalPackagePrivateHelper.RemoteOutcomeParams params = new OneSignalPackagePrivateHelper.RemoteOutcomeParams();
+      notificationData.saveOutcomesParams(params);
+
+      // Background app for 31 seconds
+      blankActivityController.pause();
+      threadAndTaskWait();
+      advanceSystemTimeBy(31);
+
+      // Click notification
+      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Test Msg\", \"custom\": { \"i\": \"UUID\" } }]"), false, "notification_id");
+      threadAndTaskWait();
+
+      // Foreground app
+      blankActivityController.resume();
+      threadAndTaskWait();
+
+      // Make sure on_session is called
+      assertTrue(ShadowOneSignalRestClient.lastUrl.matches("players/.*/on_session"));
+
+      advanceSystemTimeBy(61);
+
+      // Background app
+      blankActivityController.pause();
+      threadAndTaskWait();
+
+      // A sync job should have been schedule, lets run it to ensure on_focus is called.
+      assertRestCalls(4);
+      TestHelpers.runNextJob();
+      threadAndTaskWait();
+
+      assertOnFocusAtIndex(4, new JSONObject() {{
+         put("active_time", 61);
+         put("direct", true);
+         put("notification_ids", new JSONArray().put("notification_id"));
+      }});
+   }
+
+   @Test
+   public void testAppOnFocus_wontContainOutcomeData_withOutcomeEventFlagsDisabled() throws Exception {
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // Disable all outcome flags
+      OneSignalPackagePrivateHelper.RemoteOutcomeParams params = new OneSignalPackagePrivateHelper.RemoteOutcomeParams(false, false, false);
+      notificationData.saveOutcomesParams(params);
+
+      // Background app for 31 seconds
+      blankActivityController.pause();
+      threadAndTaskWait();
+      advanceSystemTimeBy(31);
+
+      // Click notification
+      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Test Msg\", \"custom\": { \"i\": \"UUID\" } }]"), false, ONESIGNAL_NOTIFICATION_ID + "1");
+      threadAndTaskWait();
+
+      // Foreground app
+      blankActivityController.resume();
+      threadAndTaskWait();
+      // Make sure on_session is called
+      assertTrue(ShadowOneSignalRestClient.lastUrl.matches("players/.*/on_session"));
+
+      // Wait 61 seconds
+      advanceSystemTimeBy(60);
+
+      // Background app
+      blankActivityController.pause();
+      threadAndTaskWait();
+
+      // Make sure no direct flag or notifications are added into the on_focus
+      assertOnFocusAtIndex(4, new JSONObject().put("active_time", 60));
+      assertOnFocusAtIndexDoesNotHaveKeys(4, Arrays.asList("notification_ids", "direct"));
+
+      // If we have a job make sure it doesn't make another on_focus call
+      runNextJob();
+      threadAndTaskWait();
+      assertRestCalls(5);
+   }
+
+   @Test
+   public void testAppOnFocusNeededAfterOnSessionCallFail() throws Exception {
+      advanceSystemTimeBy(60);
+      OneSignalInit();
+      threadAndTaskWait();
+
+      blankActivityController.resume();
+      threadAndTaskWait();
+
+      notificationData.markLastNotificationReceived("notification_id");
+
+      OneSignalPackagePrivateHelper.RemoteOutcomeParams params = new OneSignalPackagePrivateHelper.RemoteOutcomeParams();
+
+      notificationData.saveOutcomesParams(params);
+      advanceSystemTimeBy(10);
+
+      ShadowOneSignalRestClient.lastUrl = null;
+      blankActivityController.pause();
+      threadAndTaskWait();
+
+      assertNull(ShadowOneSignalRestClient.lastUrl);
+   }
+
+   @Test
+   public void testAppTwiceOnFocusNeededAfterOnSessionCallFail() throws Exception {
+      OneSignalInit();
+      threadAndTaskWait();
+
+      blankActivityController.pause();
+      threadAndTaskWait();
+      advanceSystemTimeBy(31);
+
+      notificationData.markLastNotificationReceived("notification_id");
+      blankActivityController.resume();
+      threadAndTaskWait();
+
+      assertTrue(ShadowOneSignalRestClient.lastUrl.matches("players/.*/on_session"));
+
+      OneSignalPackagePrivateHelper.RemoteOutcomeParams params = new OneSignalPackagePrivateHelper.RemoteOutcomeParams();
+      notificationData.saveOutcomesParams(params);
+
+      advanceSystemTimeBy(61);
+
+      blankActivityController.pause();
+      threadAndTaskWait();
+
+      // on_focus should not run yet as we need to wait until the job kicks off due to needing
+      //   to wait until the session is ended for outcome session counts to be correct
+      assertRestCalls(3);
+
+      runNextJob();
+      threadAndTaskWait();
+      assertRestCalls(4);
+      assertOnFocusAtIndex(3, new JSONObject() {{
+         put("active_time", 61);
+         put("direct", false);
+         put("notification_ids", new JSONArray().put("notification_id"));
+      }});
+
+      // Doing a quick 1 second focus should NOT trigger another network call
+      blankActivityController.resume();
+      threadAndTaskWait();
+      advanceSystemTimeBy(1);
+      blankActivityController.pause();
+      threadAndTaskWait();
+
+      assertRestCalls(4);
+   }
+
+   private static void setOneSignalContextOpenAppThenBackgroundAndResume() throws Exception {
+      // 1. Context could be set by the app like this; Or on it's own when a push or other event happens
+      OneSignal.setAppContext(blankActivity.getApplication());
+
+      // 2. App is opened by user
+      blankActivityController.resume();
+      threadAndTaskWait();
+
+      // 3. User backgrounds app
+      blankActivityController.pause();
+      threadAndTaskWait();
+
+      // 4. User goes back to app again
+      blankActivityController.resume();
+      threadAndTaskWait();
+   }
+
+   @Test
+   public void testAppDoesNotCrashIfContextIsSetupViaEventButInitWasNotCalled() throws Exception {
+      setOneSignalContextOpenAppThenBackgroundAndResume();
+      assertRestCalls(0);
+   }
+
+   @Test
+   public void testStillRegistersIfInitCalledAfterIgnoredFocusEvents() throws Exception {
+      setOneSignalContextOpenAppThenBackgroundAndResume();
+
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // Assert network calls are still made after SDK is initialized.
+      assertRemoteParamsAtIndex(0);
+      assertPlayerCreatePushAtIndex(1);
+      assertRestCalls(2);
+   }
+
+   @Test
    public void testOnSessionCalledOnlyOncePer30Sec() throws Exception {
       // Will call create
-      ShadowSystemClock.setCurrentTimeMillis(60 * 60 * 1000);
+      advanceSystemTimeBy(2 * 60);
       OneSignalInit();
       threadAndTaskWait();
       blankActivityController.resume();
@@ -271,7 +715,7 @@ public class MainOneSignalClassRunner {
 
       // Or when restarting the app quickly.
       ShadowOneSignalRestClient.lastPost = null;
-      fastAppRestart();
+      fastColdRestartApp();
       OneSignalInit();
       threadAndTaskWait();
       blankActivityController.resume();
@@ -280,7 +724,7 @@ public class MainOneSignalClassRunner {
 
       blankActivityController.pause();
       threadAndTaskWait();
-      ShadowSystemClock.setCurrentTimeMillis(121 * 60 * 1000);
+      advanceSystemTimeBy(2 * 60);
       ShadowOneSignalRestClient.lastUrl = null;
       blankActivityController.resume();
       threadAndTaskWait();
@@ -290,8 +734,6 @@ public class MainOneSignalClassRunner {
 
    @Test
    public void testAlwaysUseRemoteProjectNumberOverLocal() throws Exception {
-      ShadowSystemClock.setCurrentTimeMillis(60 * 60 * 1000);
-
       OneSignalInit();
       threadAndTaskWait();
       assertEquals("87654321", ShadowPushRegistratorGCM.lastProjectNumber);
@@ -301,7 +743,7 @@ public class MainOneSignalClassRunner {
 
       blankActivityController.pause();
       threadAndTaskWait();
-      ShadowSystemClock.setCurrentTimeMillis(121 * 60 * 1000);
+      advanceSystemTimeBy(31);
       blankActivityController.resume();
       threadAndTaskWait();
 
@@ -312,8 +754,6 @@ public class MainOneSignalClassRunner {
 
    @Test
    public void testPutStillCalledOnChanges() throws Exception {
-      // Will call create
-      ShadowSystemClock.setCurrentTimeMillis(60 * 60 * 1000);
       OneSignalInit();
       threadAndTaskWait();
       blankActivityController.resume();
@@ -332,7 +772,7 @@ public class MainOneSignalClassRunner {
 
       // Should make PUT call with changes on app restart
       ShadowOneSignalRestClient.lastPost = null;
-      fastAppRestart();
+      fastColdRestartApp();
       OneSignalInit();
       threadAndTaskWait();
       blankActivityController.resume();
@@ -344,11 +784,71 @@ public class MainOneSignalClassRunner {
       assertEquals("{\"carrier\":\"test2\",\"app_id\":\"b2f7f966-d8cc-11e4-bed1-df8f05be55ba\"}", ShadowOneSignalRestClient.lastPost.toString());
    }
 
+   @Test
+   public void testCreatesEvenIfAppIsQuicklyForceKilledOnFirstLaunch() throws Exception {
+      // 1. App cold restarted before the device has a chance to create a player
+      OneSignalInit();
+      fastColdRestartApp();
+
+      // 2. 2nd cold start of the app.
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // 3. Ensure we made 3 network calls. (2 to android_params and 1 create player call)
+      assertEquals(3, ShadowOneSignalRestClient.networkCallCount);
+      assertEquals("players", ShadowOneSignalRestClient.lastUrl);
+      assertEquals(REST_METHOD.POST, ShadowOneSignalRestClient.requests.get(2).method);
+   }
+
+   @Test
+   public void testOnSessionEvenIfQuickAppRestart() throws Exception {
+      // 1. Do app first start and register the device for a player id
+      OneSignalInit();
+      threadAndTaskWait();
+
+      restartAppAndElapseTimeToNextSession();
+
+      // 2. App is restarted before it can make it's on_session call
+      OneSignalInit();
+      fastColdRestartApp();
+
+      // 3. 3rd start of the app, we should make an on_session call since the last one did not go through
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // 4. Ensure we made 4 network calls. (2 to android_params and 1 create player call)
+      assertEquals(5, ShadowOneSignalRestClient.networkCallCount);
+      GetIdsAvailable();
+      assertEquals("players/" + callBackUseId + "/on_session", ShadowOneSignalRestClient.lastUrl);
+      assertEquals(REST_METHOD.POST, ShadowOneSignalRestClient.requests.get(4).method);
+   }
+
+   @Test
+   public void testOnSessionFlagIsClearedAfterSuccessfullySynced() throws Exception {
+      // 1. App cold restarted before the device has a chance to create a player
+      OneSignalInit();
+      fastColdRestartApp();
+
+      // 2. 2nd cold start of the app, waiting to make sure device gets registered
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // 3. Restart the app without wating.
+      fastColdRestartApp();
+
+      // 4. 3rd cold start of the app.
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // 4. Ensure we made 4 network calls. (3 to android_params and 1 create player call)
+      //    We are making sure we are only making on create call and NO on_session calls
+      assertEquals(4, ShadowOneSignalRestClient.networkCallCount);
+      assertEquals("players", ShadowOneSignalRestClient.requests.get(2).url);
+      assertEquals(REST_METHOD.POST, ShadowOneSignalRestClient.requests.get(2).method);
+   }
 
    @Test
    public void testPutCallsMadeWhenUserStateChangesOnAppResume() throws Exception {
-      // Will call create
-      ShadowSystemClock.setCurrentTimeMillis(60 * 60 * 1000);
       OneSignalInit();
       threadAndTaskWait();
       blankActivityController.resume();
@@ -357,7 +857,8 @@ public class MainOneSignalClassRunner {
 
    @Test
    public void testOpenFromNotificationWhenAppIsDead() throws Exception {
-      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Robo test message\", \"custom\": { \"i\": \"UUID\" } }]"), false);
+      OneSignal.setAppContext(blankActivity);
+      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Robo test message\", \"custom\": { \"i\": \"UUID\" } }]"), false, ONESIGNAL_NOTIFICATION_ID);
 
       OneSignal.init(blankActivity, "123456789", ONESIGNAL_APP_ID, getNotificationOpenedHandler());
 
@@ -373,37 +874,39 @@ public class MainOneSignalClassRunner {
 
       assertThat(ShadowPushRegistratorGCM.lastProjectNumber, not("123456789"));
    }
-   
+
    @Test
    public void testNullProjectNumberSetsErrorType() throws Exception {
       // Get call will not return a Google project number if it hasn't been entered on the OneSignal dashboard.
-      ShadowOneSignalRestClient.nextSuccessResponse = "{\"awl_list\": {}}";
+      ShadowOneSignalRestClient.setNextSuccessfulJSONResponse(new JSONObject() {{
+         put("awl_list", new JSONObject());
+      }});
+
       // Don't fire the mock callback, it will be done from the real class.
       ShadowPushRegistratorGCM.skipComplete = true;
-      
+
       OneSignal.init(blankActivity, null, ONESIGNAL_APP_ID);
       threadAndTaskWait();
-      
+
       assertEquals(-6, ShadowOneSignalRestClient.lastPost.getInt("notification_types"));
    }
-   
+
    @Test
    @Config(shadows = {ShadowRoboNotificationManager.class}, sdk = 26)
    public void testNotificationChannelListPayload() throws Exception {
       NotificationChannelManagerRunner testHelper = new NotificationChannelManagerRunner().setContext(blankActivity);
-      JSONObject payloadList = testHelper.createBasicChannelListPayload();
-   
+
       JSONObject androidParams = testHelper.createBasicChannelListPayload();
       androidParams.put("awl_list", new JSONObject());
       // Get call will not return a Google project number if it hasn't been entered on the OneSignal dashboard.
-      ShadowOneSignalRestClient.nextSuccessResponse = androidParams.toString();
-      
+      ShadowOneSignalRestClient.setNextSuccessfulJSONResponse(androidParams);
+
       // Don't fire the mock callback, it will be done from the real class.
 //      ShadowPushRegistratorGCM.skipComplete = true;
-      
+
       OneSignal.init(blankActivity, null, ONESIGNAL_APP_ID);
       threadAndTaskWait();
-   
+
       testHelper.assertChannelsForBasicChannelList();
    }
 
@@ -413,7 +916,7 @@ public class MainOneSignalClassRunner {
       threadAndTaskWait();
 
       OneSignal.removeNotificationOpenedHandler();
-      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Robo test message\", \"custom\": { \"i\": \"UUID\" } }]"), false);
+      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Robo test message\", \"custom\": { \"i\": \"UUID\" } }]"), false, ONESIGNAL_NOTIFICATION_ID);
       assertNull(notificationOpenedMessage);
 
       OneSignal.init(blankActivity, "123456789", ONESIGNAL_APP_ID, getNotificationOpenedHandler());
@@ -443,23 +946,13 @@ public class MainOneSignalClassRunner {
    }
 
    @Test
-   public void testOpenFromNotificationWhenAppIsInBackground() throws Exception {
-      OneSignal.init(blankActivity, "123456789", ONESIGNAL_APP_ID, getNotificationOpenedHandler());
-      assertNull(notificationOpenedMessage);
-
-      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Test Msg\", \"custom\": { \"i\": \"UUID\" } }]"), false);
-      assertEquals("Test Msg", notificationOpenedMessage);
-      threadAndTaskWait();
-   }
-
-   @Test
    public void testOpeningLauncherActivity() throws Exception {
       AddLauncherIntentFilter();
 
       // From app launching normally
       assertNotNull(shadowOf(blankActivity).getNextStartedActivity());
-
-      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Test Msg\", \"custom\": { \"i\": \"UUID\" } }]"), false);
+      OneSignal.setAppContext(blankActivity);
+      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Test Msg\", \"custom\": { \"i\": \"UUID\" } }]"), false, ONESIGNAL_NOTIFICATION_ID);
 
       assertNotNull(shadowOf(blankActivity).getNextStartedActivity());
       assertNull(shadowOf(blankActivity).getNextStartedActivity());
@@ -467,40 +960,44 @@ public class MainOneSignalClassRunner {
 
    @Test
    public void testOpeningLaunchUrl() throws Exception {
+      OneSignal.setAppContext(blankActivity);
       // Removes app launch
       shadowOf(blankActivity).getNextStartedActivity();
 
       // No OneSignal init here to test case where it is located in an Activity.
 
-      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Test Msg\", \"custom\": { \"i\": \"UUID\", \"u\": \"http://google.com\" } }]"), false);
-
+      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Test Msg\", \"custom\": { \"i\": \"UUID\", \"u\": \"http://google.com\" } }]"), false, ONESIGNAL_NOTIFICATION_ID);
       Intent intent = shadowOf(blankActivity).getNextStartedActivity();
       assertEquals("android.intent.action.VIEW", intent.getAction());
       assertEquals("http://google.com", intent.getData().toString());
       assertNull(shadowOf(blankActivity).getNextStartedActivity());
    }
 
-   @Config(manifest="AndroidManifestDefaultOpenDisabled.xml")
    @Test
    public void testOpeningLaunchUrlWithDisableDefault() throws Exception {
+      // Add the 'com.onesignal.NotificationOpened.DEFAULT' as 'DISABLE' meta-data tag
+      OneSignalShadowPackageManager.addManifestMetaData("com.onesignal.NotificationOpened.DEFAULT", "DISABLE");
+
       // Removes app launch
       shadowOf(blankActivity).getNextStartedActivity();
 
       // No OneSignal init here to test case where it is located in an Activity.
 
-      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Test Msg\", \"custom\": { \"i\": \"UUID\", \"u\": \"http://google.com\" } }]"), false);
+      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Test Msg\", \"custom\": { \"i\": \"UUID\", \"u\": \"http://google.com\" } }]"), false, ONESIGNAL_NOTIFICATION_ID);
       assertNull(shadowOf(blankActivity).getNextStartedActivity());
    }
 
-   @Config(manifest="AndroidManifestDefaultOpenDisabled.xml")
    @Test
-   public void testDisableOpeningLauncherActivityOnNotifiOpen() throws Exception {
+   public void testDisableOpeningLauncherActivityOnNotificationOpen() throws Exception {
+      // Add the 'com.onesignal.NotificationOpened.DEFAULT' as 'DISABLE' meta-data tag
+      OneSignalShadowPackageManager.addManifestMetaData("com.onesignal.NotificationOpened.DEFAULT", "DISABLE");
+
       // From app launching normally
       assertNotNull(shadowOf(blankActivity).getNextStartedActivity());
       OneSignal.init(blankActivity, "123456789", ONESIGNAL_APP_ID, getNotificationOpenedHandler());
       assertNull(notificationOpenedMessage);
 
-      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Test Msg\", \"custom\": { \"i\": \"UUID\" } }]"), false);
+      OneSignal.handleNotificationOpen(blankActivity, new JSONArray("[{ \"alert\": \"Test Msg\", \"custom\": { \"i\": \"UUID\" } }]"), false, ONESIGNAL_NOTIFICATION_ID);
 
       assertNull(shadowOf(blankActivity).getNextStartedActivity());
       assertEquals("Test Msg", notificationOpenedMessage);
@@ -524,12 +1021,13 @@ public class MainOneSignalClassRunner {
       Bundle bundle = getBaseNotifBundle();
       boolean processResult = GcmBroadcastReceiver_processBundle(blankActivity, bundle);
       threadAndTaskWait();
-      assertEquals(null, notificationOpenedMessage);
+
+      assertNull(notificationOpenedMessage);
       assertFalse(processResult);
       // NotificationBundleProcessor.Process(...) will be called if processResult is true as a service
       NotificationBundleProcessor_Process(blankActivity, false, bundleAsJSONObject(bundle), null);
       assertEquals("Robo test message", notificationReceivedBody);
-      assertFalse(0 == androidNotificationId);
+      assertNotEquals(0, androidNotificationId);
 
       // Don't fire for duplicates
       notificationOpenedMessage = null;
@@ -539,8 +1037,8 @@ public class MainOneSignalClassRunner {
 
       GcmBroadcastReceiver_processBundle(blankActivity, bundle);
       threadAndTaskWait();
-      assertEquals(null, notificationOpenedMessage);
-      assertEquals(null, notificationReceivedBody);
+      assertNull(notificationOpenedMessage);
+      assertNull(notificationReceivedBody);
 
       // Test that only NotificationReceivedHandler fires
       OneSignal.setInFocusDisplaying(OneSignal.OSInFocusDisplayOption.None);
@@ -550,7 +1048,6 @@ public class MainOneSignalClassRunner {
 
       GcmBroadcastReceiver_processBundle(blankActivity, bundle);
       threadAndTaskWait();
-      assertEquals(null, notificationOpenedMessage);
       assertNull(notificationOpenedMessage);
       assertEquals("Robo test message", notificationReceivedBody);
    }
@@ -716,7 +1213,7 @@ public class MainOneSignalClassRunner {
       OneSignal.setSubscription(true);
 
       // Restart app - Should send subscribe with on_session call.
-      fastAppRestart();
+      fastColdRestartApp();
       ShadowPushRegistratorGCM.fail = false;
       OneSignalInit();
       threadAndTaskWait();
@@ -794,12 +1291,28 @@ public class MainOneSignalClassRunner {
    }
 
    @Test
-   public void testChangeAppId() throws Exception {
+   public void testChangeAppId_fromColdStart() throws Exception {
       OneSignalInit();
       threadAndTaskWait();
 
       int normalCreateFieldCount = ShadowOneSignalRestClient.lastPost.length();
-      fastAppRestart();
+      fastColdRestartApp();
+      OneSignal.init(blankActivity, "123456789", "99f7f966-d8cc-11e4-bed1-df8f05be55b2");
+      threadAndTaskWait();
+
+      assertEquals(normalCreateFieldCount, ShadowOneSignalRestClient.lastPost.length());
+   }
+
+   /**
+    * Similar to testChangeAppId_fromColdStart test
+    */
+   @Test
+   public void testChangeAppId_duringRuntime() throws Exception {
+      OneSignalInit();
+      threadAndTaskWait();
+
+      int normalCreateFieldCount = ShadowOneSignalRestClient.lastPost.length();
+      ShadowOneSignalRestClient.resetStatics();
       OneSignal.init(blankActivity, "123456789", "99f7f966-d8cc-11e4-bed1-df8f05be55b2");
       threadAndTaskWait();
 
@@ -808,31 +1321,42 @@ public class MainOneSignalClassRunner {
 
    @Test
    public void testUserDeletedFromServer() throws Exception {
-      // First cold boot normal
+      // 1. Open app and register for the first time.
       OneSignalInit();
       threadAndTaskWait();
 
       int normalCreateFieldCount = ShadowOneSignalRestClient.lastPost.length();
       ShadowOneSignalRestClient.lastPost = null;
 
-      // Developer deletes user, cold boots apps should resend all fields
+      // 2. Developer deletes user and cold restarts the app
       restartAppAndElapseTimeToNextSession();
       ShadowOneSignalRestClient.failNext = true;
-      ShadowOneSignalRestClient.failResponse = "{\"errors\":[\"Device type  is not a valid device_type. Valid options are: 0 = iOS, 1 = Android, 2 = Amazon, 3 = WindowsPhone(MPNS), 4 = ChromeApp, 5 = ChromeWebsite, 6 = WindowsPhone(WNS), 7 = Safari(APNS), 8 = Firefox\"]}";
+      ShadowOneSignalRestClient.setNextFailureJSONResponse(new JSONObject() {{
+         put("errors", new JSONArray() {{
+            put("Device type  is not a valid device_type. Valid options are: 0 = iOS, 1 = Android, 2 = Amazon, 3 = WindowsPhone(MPNS), 4 = ChromeApp, 5 = ChromeWebsite, 6 = WindowsPhone(WNS), 7 = Safari(APNS), 8 = Firefox");
+         }});
+      }});
       OneSignalInit();
       threadAndTaskWait();
 
+      // 3. Assert the SDK handles the error above and make a new create call.
+      assertPlayerCreatePushAtIndex(4);
+      // Checking that the number  of fields matches exactly to the original create call.
       assertEquals(normalCreateFieldCount, ShadowOneSignalRestClient.lastPost.length());
 
-
-      // Developer deletes users again from dashboard while app is running.
-      ShadowOneSignalRestClient.lastPost = null;
+      // 4. Developer deletes users again from dashboard while app is running.
       ShadowOneSignalRestClient.failNext = true;
-      ShadowOneSignalRestClient.failResponse = "{\"errors\":[\"No user with this id found\"]}";
+      ShadowOneSignalRestClient.setNextFailureJSONResponse(new JSONObject() {{
+         put("errors", new JSONArray().put("No user with this id found"));
+      }});
+      // 5. Make some call the will attempt a player update
       OneSignal.sendTag("key1", "value1");
       threadAndTaskWait();
 
-      assertEquals(normalCreateFieldCount, ShadowOneSignalRestClient.lastPost.length() - 1);
+      // 6. Assert the SDK handles the error above and make a new create call.
+      assertPlayerCreatePushAtIndex(6);
+      // Checking that the number of fields matches original create call, +1 for tags
+      assertEquals(normalCreateFieldCount + 1, ShadowOneSignalRestClient.lastPost.length());
    }
 
    @Test
@@ -1268,7 +1792,7 @@ public class MainOneSignalClassRunner {
       assertNotNull(callBackUseId);
    }
 
-   private class TestChangeTagsUpdateHandler implements ChangeTagsUpdateHandler {
+   private static class TestChangeTagsUpdateHandler implements ChangeTagsUpdateHandler {
       private AtomicBoolean succeeded = new AtomicBoolean(false);
       private AtomicBoolean failed = new AtomicBoolean(false);
 
@@ -1346,6 +1870,29 @@ public class MainOneSignalClassRunner {
 
       assertTrue(firstHandler.getSucceeded());
       assertTrue(secondHandler.getSucceeded());
+   }
+
+   @Test
+   public void testNestedSendTagsOnSuccess() throws Exception {
+      final JSONObject tags = new JSONObject().put("key", "value");
+
+      OneSignalInit();
+      OneSignal.sendTags(tags);
+      threadAndTaskWait();
+
+      // Sending same tags a 2nd time creates the issue, as it take a different code path
+      OneSignal.sendTags(
+         tags,
+         new ChangeTagsUpdateHandler() {
+            @Override
+            public void onSuccess(JSONObject values) {
+               OneSignal.sendTags(tags, new TestChangeTagsUpdateHandler());
+            }
+            @Override
+            public void onFailure(OneSignal.SendTagsError error) {}
+         }
+      );
+      threadAndTaskWait();
    }
 
    @Test
@@ -1483,7 +2030,7 @@ public class MainOneSignalClassRunner {
       OneSignal.syncHashedEmail("test@test.com");
 
       for(int a = 0; a < 500; a++) {
-         OneSignal.sendTag("a"+a,String.valueOf(a));
+         OneSignal.sendTag("a" + a, String.valueOf(a));
       }
 
       OneSignal.getTags(new OneSignal.GetTagsHandler() {
@@ -1492,7 +2039,7 @@ public class MainOneSignalClassRunner {
             //assert that the first 10 tags sent were available
             try {
                for(int a = 0; a < 10; a++) {
-                  assertEquals(String.valueOf(a),tags.get("a"+a));
+                  assertEquals(String.valueOf(a), tags.get("a" + a));
                }
             }
             catch (Exception e) {
@@ -1500,6 +2047,7 @@ public class MainOneSignalClassRunner {
             }
          }
       });
+      threadAndTaskWait();
 
       final AtomicBoolean callbackFired = new AtomicBoolean(false);
       OneSignal.IdsAvailableHandler idsAvailableHandler = new OneSignal.IdsAvailableHandler() {
@@ -1702,7 +2250,7 @@ public class MainOneSignalClassRunner {
    public void shouldSaveToSyncIfKilledAndSyncOnNextAppStart() throws Exception {
       OneSignalInit();
       threadAndTaskWait();
-      
+
       OneSignal.sendTag("key", "value");
       // Pause Activity and trigger delayed runnable that will trigger out of focus logic
       blankActivityController.pause();
@@ -1712,7 +2260,7 @@ public class MainOneSignalClassRunner {
       assertEquals(2, ShadowOneSignalRestClient.networkCallCount);
 
       // App closed and re-opened.
-      fastAppRestart();
+      fastColdRestartApp();
       OneSignalInit();
       threadAndTaskWait();
 
@@ -1725,23 +2273,23 @@ public class MainOneSignalClassRunner {
    public void shouldSyncPendingChangesFromSyncService() throws Exception {
       OneSignalInit();
       threadAndTaskWait();
-      
+
       OneSignal.sendTag("key", "value");
-   
+
       // App is swiped away
       blankActivityController.pause();
       OneSignalPackagePrivateHelper.runFocusRunnables();
       assertEquals(2, ShadowOneSignalRestClient.networkCallCount);
-      fastAppRestart();
+      fastColdRestartApp();
       threadAndTaskWait();
-   
+
       // Tags did not get synced so SyncService should be scheduled
       AlarmManager alarmManager = (AlarmManager)RuntimeEnvironment.application.getSystemService(Context.ALARM_SERVICE);
       ShadowAlarmManager shadowAlarmManager = shadowOf(alarmManager);
       assertEquals(1, shadowAlarmManager.getScheduledAlarms().size());
       assertEquals(SyncService.class, shadowOf(shadowOf(shadowAlarmManager.getNextScheduledAlarm().operation).getSavedIntent()).getIntentClass());
       shadowAlarmManager.getScheduledAlarms().clear();
-   
+
       // Test running the service
       Robolectric.buildService(SyncService.class).startCommand(0, 0);
       threadAndTaskWait();
@@ -1751,7 +2299,7 @@ public class MainOneSignalClassRunner {
       // Test starting app
       OneSignalInit();
       threadAndTaskWait();
-      
+
       // No new changes, don't schedule another restart.
       // App is swiped away
       blankActivityController.pause();
@@ -1808,8 +2356,7 @@ public class MainOneSignalClassRunner {
       sendTagsAndImmediatelyBackgroundApp();
 
       // A future job should be scheduled to finish the sync.
-      JobScheduler jobScheduler = (JobScheduler)blankActivity.getSystemService(Context.JOB_SCHEDULER_SERVICE);
-      assertEquals("com.onesignal.SyncJobService", jobScheduler.getAllPendingJobs().get(0).getService().getClassName());
+      assertEquals("com.onesignal.SyncJobService", getNextJob().getService().getClassName());
    }
 
    @Test
@@ -1818,8 +2365,7 @@ public class MainOneSignalClassRunner {
       blankActivityController.resume();
 
       // Jobs should no longer be not be scheduled
-      JobScheduler jobScheduler = (JobScheduler) blankActivity.getSystemService(Context.JOB_SCHEDULER_SERVICE);
-      assertEquals(0, jobScheduler.getAllPendingJobs().size());
+      assertNull(getNextJob());
    }
 
    @Test
@@ -1862,8 +2408,7 @@ public class MainOneSignalClassRunner {
       OneSignalInit();
       threadAndTaskWait();
 
-      JobScheduler jobScheduler = (JobScheduler)blankActivity.getSystemService(Context.JOB_SCHEDULER_SERVICE);
-      assertEquals("com.onesignal.SyncJobService", jobScheduler.getAllPendingJobs().get(0).getService().getClassName());
+      assertEquals("com.onesignal.SyncJobService", getNextJob().getService().getClassName());
    }
 
    private void useAppFor2minThenBackground() throws Exception {
@@ -1872,11 +2417,12 @@ public class MainOneSignalClassRunner {
       threadAndTaskWait();
 
       // 2. Wait 2 minutes
-      ShadowSystemClock.setCurrentTimeMillis(120_000);
+      advanceSystemTimeBy(2 * 60);
 
       // 3. Put app in background
       blankActivityController.pause();
       OneSignalPackagePrivateHelper.runFocusRunnables();
+      threadAndTaskWait();
    }
 
    @Test
@@ -1884,15 +2430,14 @@ public class MainOneSignalClassRunner {
    public void ensureSchedulingOfSyncJobServiceOnActivityPause_forPendingActiveTime() throws Exception {
       useAppFor2minThenBackground();
 
-      // A future job should be scheduled to finish the sync.
-      JobScheduler jobScheduler = (JobScheduler)blankActivity.getSystemService(Context.JOB_SCHEDULER_SERVICE);
-      assertEquals("com.onesignal.SyncJobService", jobScheduler.getAllPendingJobs().get(0).getService().getClassName());
-   }
+      // A future job should be scheduled to finish the sync in case the process is killed
+      //   for the on_focus call can be made.
+      assertEquals("com.onesignal.SyncJobService", getNextJob().getService().getClassName());
 
-   private static void assertSuccessfulOnFocus(ShadowOneSignalRestClient.Request request) {
-      assertThat(request.method, is(REST_METHOD.POST));
-      assertThat(request.url, containsString("focus"));
-      assertThat(request.payload.optInt("active_time"), is(120));
+      // FIXME: Cleanup for upcoming unit test
+      //  This is a one off scenario where a unit test fails after this one is run
+      blankActivityController.resume();
+      threadAndTaskWait();
    }
 
    @Test
@@ -1902,8 +2447,8 @@ public class MainOneSignalClassRunner {
       blankActivityController.resume();
       threadAndTaskWait();
 
-      assertThat(ShadowOneSignalRestClient.requests.size(), is(3));
-      assertSuccessfulOnFocus(ShadowOneSignalRestClient.requests.get(2));
+      assertRestCalls(3);
+      assertOnFocusAtIndex(2, 120);
    }
 
    @Test
@@ -1914,7 +2459,7 @@ public class MainOneSignalClassRunner {
       threadAndTaskWait();
 
       // 2. Wait 2 minutes
-      ShadowSystemClock.setCurrentTimeMillis(120_000);
+      advanceSystemTimeBy(2 * 60);
 
       // 3. Put app in background, simulating network issue.
       ShadowOneSignalRestClient.failAll = true;
@@ -1922,29 +2467,57 @@ public class MainOneSignalClassRunner {
       threadAndTaskWait();
       assertEquals(3, ShadowOneSignalRestClient.requests.size());
 
-
       // Simulate a hung network connection when SyncJobService starts.
       ShadowOneSignalRestClient.failAll = false;
       SyncJobService syncJobService = Robolectric.buildService(SyncJobService.class).create().get();
       syncJobService.onStartJob(null);
       threadAndTaskWait(); // Kicks off the Job service's background thread.
 
-      assertEquals(4, ShadowOneSignalRestClient.requests.size());
-      assertSuccessfulOnFocus(ShadowOneSignalRestClient.requests.get(3));
+      assertRestCalls(4);
+      assertOnFocusAtIndex(3, 120);
+
+      // FIXME: Cleanup for upcoming unit test
+      //  This is a one off scenario where a unit test fails after this one is run
+      blankActivityController.resume();
+      threadAndTaskWait();
    }
 
+   @Test
+   public void ensureNoRetriesForAndroidParamsOn403() throws Exception {
+      ShadowOneSignalRestClient.failGetParams = true;
+      ShadowOneSignalRestClient.failHttpCode = 403;
+
+      OneSignalInit();
+      threadAndTaskWait();
+
+      assertEquals(1, ShadowOneSignalRestClient.requests.size());
+   }
+
+   @Test
+   public void ensureNoRetriesForPlayerUpdatesOn403() throws Exception {
+      OneSignalInit();
+      threadAndTaskWait();
+
+      ShadowOneSignalRestClient.failAll = true;
+      ShadowOneSignalRestClient.failHttpCode = 403;
+      OneSignal.sendTag("key", "value");
+      threadAndTaskWait();
+
+      // 1. Android Param success. 2. player create success. 3. On call to update which fails without retrying.
+      assertEquals(3, ShadowOneSignalRestClient.requests.size());
+   }
 
    @Test
    @Config(sdk = 26)
    public void ensureNoConcurrentUpdateCallsWithSameData_forPendingActiveTime() throws Exception {
-      //useAppFor2minThenBackground();
+//      useAppFor2minThenBackground();
 
       // 1. Start app
       OneSignalInit();
       threadAndTaskWait();
 
       // 2. Wait 2 minutes
-      ShadowSystemClock.setCurrentTimeMillis(120_000);
+      advanceSystemTimeBy(2 * 60);
 
       // 3. Put app in background
       ShadowOneSignalRestClient.freezeResponses = true;
@@ -2005,11 +2578,11 @@ public class MainOneSignalClassRunner {
 
    // ####### DeleteTags Tests ######
    @Test
-   public void testDeleteTagWithNonexistingKey() throws Exception {
+   public void testDeleteTagWithNonexistingKey() {
       OneSignalInit();
       OneSignal.deleteTag("int");
    }
-   
+
    @Test
    public void testDeleteTags() throws Exception {
       OneSignalInit();
@@ -2082,10 +2655,10 @@ public class MainOneSignalClassRunner {
    public void testGetTagsWithNoTagsShouldBeNull() throws Exception {
       OneSignalInit();
       threadAndTaskWait();
-      
+
       GetTags();
       threadAndTaskWait();
-      
+
       assertNull(lastGetTags);
       String lastUrl = ShadowOneSignalRestClient.lastUrl;
       assertEquals("?app_id=" + ONESIGNAL_APP_ID, lastUrl.substring(lastUrl.lastIndexOf("?")));
@@ -2114,7 +2687,13 @@ public class MainOneSignalClassRunner {
       OneSignalInit();
       threadAndTaskWait();
 
-      ShadowOneSignalRestClient.nextSuccessfulGETResponse = "{\"tags\": {\"test1\": \"value1\", \"test2\": \"value2\"}}";
+      ShadowOneSignalRestClient.setNextSuccessfulGETJSONResponse(new JSONObject() {{
+         put("tags", new JSONObject() {{
+            put("test1", "value1");
+            put("test2", "value2");
+         }});
+      }});
+
       GetTags();
       threadAndTaskWait();
 
@@ -2134,7 +2713,7 @@ public class MainOneSignalClassRunner {
       // Also ensure only 1 network call is made to just send the new tags only.
       assertEquals(4, ShadowOneSignalRestClient.networkCallCount);
 
-      fastAppRestart();
+      fastColdRestartApp();
       OneSignalInit();
       threadAndTaskWait();
 
@@ -2143,7 +2722,14 @@ public class MainOneSignalClassRunner {
       ShadowOneSignalRestClient.failNextPut = true;
       OneSignal.deleteTag("test2");
       OneSignal.sendTag("test4", "value4");
-      ShadowOneSignalRestClient.nextSuccessfulGETResponse = "{\"tags\": {\"test1\": \"value1\", \"test2\": \"value2\",\"test3\": \"ShouldOverride\",\"test4\": \"RemoteShouldNotOverwriteLocalPending\"}}";
+      ShadowOneSignalRestClient.setNextSuccessfulGETJSONResponse(new JSONObject() {{
+         put("tags", new JSONObject() {{
+            put("test1", "value1");
+            put("test2", "value2");
+            put("test3", "ShouldOverride");
+            put("test4", "RemoteShouldNotOverwriteLocalPending");
+         }});
+      }});
       GetTags();
       threadAndTaskWait();
       assertEquals("value1", lastGetTags.getString("test1"));
@@ -2159,7 +2745,12 @@ public class MainOneSignalClassRunner {
 
    @Test
    public void getTagsDelayedAfterRegistering() throws Exception {
-      ShadowOneSignalRestClient.nextSuccessfulGETResponse = "{\"tags\": {\"test1\": \"value1\"}}";
+      ShadowOneSignalRestClient.setSuccessfulGETJSONResponses(new JSONObject(), new JSONObject() {{
+         put("tags", new JSONObject() {{
+            put("test1", "value1");
+         }});
+      }});
+      ShadowOneSignalRestClient.nextSuccessfulGETResponsePattern = Pattern.compile("players/.*");
 
       OneSignalInit();
       GetTags();
@@ -2210,13 +2801,13 @@ public class MainOneSignalClassRunner {
    public void sendsOnFocus() throws Exception {
       OneSignalInit();
       threadAndTaskWait();
-      blankActivityController.resume();
-      ShadowSystemClock.setCurrentTimeMillis(60 * 1000);
 
+      advanceSystemTimeBy(60);
       blankActivityController.pause();
       threadAndTaskWait();
-      assertEquals(60, ShadowOneSignalRestClient.lastPost.getInt("active_time"));
-      assertEquals(3, ShadowOneSignalRestClient.networkCallCount);
+
+      assertOnFocusAtIndex(2, 60);
+      assertRestCalls(3);
    }
 
    @Test
@@ -2226,7 +2817,7 @@ public class MainOneSignalClassRunner {
       threadAndTaskWait();
 
       blankActivityController.resume();
-      ShadowSystemClock.setCurrentTimeMillis(60 * 1000);
+      advanceSystemTimeBy(60);
       blankActivityController.pause();
       threadAndTaskWait();
 
@@ -2239,6 +2830,29 @@ public class MainOneSignalClassRunner {
       ShadowOneSignalRestClient.Request postEmail = ShadowOneSignalRestClient.requests.get(5);
       assertEquals("players/b007f967-98cc-11e4-bed1-118f05be4522/on_focus", postEmail.url);
       assertEquals(60, postEmail.payload.getInt("active_time"));
+   }
+
+   /**
+    * Similar workflow to testLocationPermissionPromptWithPrivacyConsent()
+    * We want to provide consent but make sure that session time tracking works properly
+    */
+   @Test
+   @Config(sdk = 26)
+   public void testSessionTimeTrackingOnPrivacyConsent() throws Exception {
+      OneSignal.setRequiresUserPrivacyConsent(true);
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // Provide consent to OneSignal SDK amd forward time 2 minutes
+      OneSignal.provideUserConsent(true);
+      threadAndTaskWait();
+      advanceSystemTimeBy(2 * 60);
+      blankActivityController.pause();
+      threadAndTaskWait();
+
+      // Check that time is tracked successfully by validating the "on_focus" endpoint
+      assertRestCalls(3);
+      assertOnFocusAtIndex(2, 120);
    }
 
    @Test
@@ -2324,7 +2938,7 @@ public class MainOneSignalClassRunner {
    }
 
    @Test
-   public void shouldReturnCorrectConsentRequiredStatus() throws Exception {
+   public void shouldReturnCorrectConsentRequiredStatus() {
       OneSignal.setRequiresUserPrivacyConsent(true);
 
       OneSignalInit();
@@ -2345,7 +2959,7 @@ public class MainOneSignalClassRunner {
 
       assertTrue(OneSignal.userProvidedPrivacyConsent());
 
-      fastAppRestart();
+      fastColdRestartApp();
       OneSignalInit();
       threadAndTaskWait();
 
@@ -2443,13 +3057,13 @@ public class MainOneSignalClassRunner {
 
       // Press home button after 30 sec
       blankActivityController.resume();
-      ShadowSystemClock.setCurrentTimeMillis(30 * 1000);
+      advanceSystemTimeBy(30 * 1_000L);
       blankActivityController.pause();
       threadAndTaskWait();
 
       // Press home button after 30 more sec, with a network hang
       blankActivityController.resume();
-      ShadowSystemClock.setCurrentTimeMillis(60 * 1000);
+      advanceSystemTimeBy(60 * 1_000L);
       ShadowOneSignalRestClient.interruptibleDelayNext = true;
       blankActivityController.pause();
       System.out.println("HERE1");
@@ -2508,7 +3122,7 @@ public class MainOneSignalClassRunner {
    @Config(shadows = {ShadowOneSignal.class})
    @SuppressWarnings("unchecked") // getDeclaredMethod
    public void testLocationTimeout() throws Exception {
-      //ShadowApplication.getInstance().grantPermissions(new String[]{"android.permission.YOUR_PERMISSION"});
+//      ShadowApplication.getInstance().grantPermissions(new String[]{"android.permission.YOUR_PERMISSION"});
 
       OneSignalInit();
       threadAndTaskWait();
@@ -2524,7 +3138,7 @@ public class MainOneSignalClassRunner {
 
       assertFalse(ShadowOneSignal.messages.contains("GoogleApiClient timedout"));
    }
-   
+
    @Test
    @Config(shadows = {
             ShadowGoogleApiClientBuilder.class,
@@ -2544,7 +3158,7 @@ public class MainOneSignalClassRunner {
       assertEquals(2.0, ShadowOneSignalRestClient.lastPost.optDouble("long"));
       assertEquals(3.0, ShadowOneSignalRestClient.lastPost.optDouble("loc_acc"));
       assertEquals(1, ShadowOneSignalRestClient.lastPost.optInt("loc_type"));
-   
+
       // Checking make sure an update is scheduled.
       AlarmManager alarmManager = (AlarmManager)RuntimeEnvironment.application.getSystemService(Context.ALARM_SERVICE);
       assertEquals(1, shadowOf(alarmManager).getScheduledAlarms().size());
@@ -2564,10 +3178,10 @@ public class MainOneSignalClassRunner {
       assertEquals(1.1d, ShadowOneSignalRestClient.lastPost.optDouble("lat"));
       assertEquals(2.2d, ShadowOneSignalRestClient.lastPost.optDouble("long"));
       assertEquals(3.3f, ShadowOneSignalRestClient.lastPost.opt("loc_acc"));
-      
+
       assertEquals(false, ShadowOneSignalRestClient.lastPost.opt("loc_bg"));
       assertEquals("11111111-2222-3333-4444-555555555555", ShadowOneSignalRestClient.lastPost.opt("ad_id"));
-   
+
       // Testing loc_bg
       blankActivityController.pause();
       threadAndTaskWait();
@@ -2582,7 +3196,7 @@ public class MainOneSignalClassRunner {
       assertEquals(1, ShadowOneSignalRestClient.lastPost.optInt("loc_type"));
       assertEquals("11111111-2222-3333-4444-555555555555", ShadowOneSignalRestClient.lastPost.opt("ad_id"));
    }
-   
+
    @Test
    @Config(shadows = {
             ShadowGoogleApiClientBuilder.class,
@@ -2600,7 +3214,7 @@ public class MainOneSignalClassRunner {
       OneSignalInit();
       threadAndTaskWait();
 
-      fastAppRestart();
+      fastColdRestartApp();
       AlarmManager alarmManager = (AlarmManager)RuntimeEnvironment.application.getSystemService(Context.ALARM_SERVICE);
       shadowOf(alarmManager).getScheduledAlarms().clear();
       ShadowOneSignalRestClient.lastPost = null;
@@ -2620,7 +3234,7 @@ public class MainOneSignalClassRunner {
       assertEquals(0, ShadowOneSignalRestClient.lastPost.optInt("loc_type"));
       assertEquals(12345L, ShadowOneSignalRestClient.lastPost.optInt("loc_time_stamp"));
       assertEquals(true, ShadowOneSignalRestClient.lastPost.opt("loc_bg"));
-   
+
       // Checking make sure an update is scheduled.
       alarmManager = (AlarmManager)RuntimeEnvironment.application.getSystemService(Context.ALARM_SERVICE);
       assertEquals(1, shadowOf(alarmManager).getScheduledAlarms().size());
@@ -2677,10 +3291,9 @@ public class MainOneSignalClassRunner {
       ShadowGoogleApiClientCompatProxy.skipOnConnected = true;
       OneSignalInit();
 
-      // TODO: Other, this sync seems to not omit PUT when there isn't anything to change....
       SyncJobService syncJobService = Robolectric.buildService(SyncJobService.class).create().get();
       syncJobService.onStartJob(null);
-      Thread.sleep(1_000); // Short sleep to wait for the Thread in the job to run
+      TestHelpers.getThreadByName("OS_SYNCSRV_BG_SYNC").join();
       OneSignalPackagePrivateHelper.runAllNetworkRunnables();
       ShadowGoogleApiClientBuilder.connectionCallback.onConnected(null);
       threadAndTaskWait();
@@ -2688,50 +3301,6 @@ public class MainOneSignalClassRunner {
       ShadowOneSignalRestClient.Request request = ShadowOneSignalRestClient.requests.get(3);
       assertEquals(REST_METHOD.POST, request.method);
       assertEquals("players/a2f7f967-e8cc-11e4-bed1-118f05be4511/on_session", request.url);
-   }
-
-   @Test
-   public void testAppl() throws Exception {
-      shadowOf(blankActivity.getPackageManager()).addPackage("org.robolectric.default");
-
-      OneSignalInit();
-      threadAndTaskWait();
-      String baseKey = "pkgs";
-      assertEquals(1, ShadowOneSignalRestClient.lastPost.getJSONArray(baseKey + "_a").length());
-
-      flushBufferedSharedPrefs();
-      final SharedPreferences prefs = blankActivity.getSharedPreferences(OneSignal.class.getSimpleName(), Context.MODE_PRIVATE);
-      JSONObject syncValues = new JSONObject(prefs.getString("ONESIGNAL_USERSTATE_SYNCVALYES_CURRENT_STATE", null));
-      assertFalse(syncValues.has(baseKey + "_a"));
-      assertEquals(1, syncValues.getJSONArray(baseKey).length());
-
-      JSONObject toSyncValues = new JSONObject(prefs.getString("ONESIGNAL_USERSTATE_SYNCVALYES_TOSYNC_STATE", null));
-      assertFalse(toSyncValues.has(baseKey + "_a"));
-      assertEquals(1, toSyncValues.getJSONArray(baseKey).length());
-
-      restartAppAndElapseTimeToNextSession();
-      ShadowOneSignalRestClient.lastPost = null;
-      shadowOf(blankActivity.getPackageManager()).addPackage("org.test.app2");
-      OneSignalInit();
-      threadAndTaskWait();
-      assertEquals(1, ShadowOneSignalRestClient.lastPost.getJSONArray(baseKey + "_a").length());
-
-      restartAppAndElapseTimeToNextSession();
-      ShadowOneSignalRestClient.lastPost = null;
-      shadowOf(blankActivity.getPackageManager()).removePackage("org.test.app2");
-      OneSignalInit();
-      threadAndTaskWait();
-      assertEquals(1, ShadowOneSignalRestClient.lastPost.getJSONArray(baseKey + "_d").length());
-
-      restartAppAndElapseTimeToNextSession();
-      ShadowOneSignalRestClient.lastPost = null;
-      OneSignalInit();
-      threadAndTaskWait();
-
-      System.out.println("ShadowOneSignalRestClient.lastPost: " + ShadowOneSignalRestClient.lastPost);
-
-      assertFalse(ShadowOneSignalRestClient.lastPost.has(baseKey + "_d"));
-      assertFalse(ShadowOneSignalRestClient.lastPost.has(baseKey + "_a"));
    }
 
    // ####### Unit test postNotification #####
@@ -2761,8 +3330,14 @@ public class MainOneSignalClassRunner {
       assertNull(postNotificationFailure);
       postNotificationSuccess = postNotificationFailure = null;
 
+      ShadowOneSignalRestClient.setNextSuccessfulJSONResponse(new JSONObject() {{
+         put("id", "");
+         put("recipients", 0);
+         put("errors", new JSONArray() {{
+            put("All included players are not subscribed");
+         }});
+      }});
 
-      ShadowOneSignalRestClient.nextSuccessResponse = "{\"id\":\"\",\"recipients\":0,\"errors\":[\"All included players are not subscribed\"]}";
       OneSignal.postNotification("{}", handler);
       assertNull(postNotificationSuccess);
       assertNotNull(postNotificationFailure);
@@ -2830,32 +3405,32 @@ public class MainOneSignalClassRunner {
 
       JSONObject additionalData = testJsonObj.optJSONObject("notification").optJSONObject("payload").optJSONObject("additionalData");
       assertEquals("bar", additionalData.optString("foo"));
-      
+
       JSONObject firstGroupedNotification = (JSONObject)testJsonObj.optJSONObject("notification").optJSONArray("groupedNotifications").get(0);
       assertEquals("collapseId1", firstGroupedNotification.optString("collapseId"));
    }
-   
+
    @Test
    public void testNotificationOpenedProcessorHandlesEmptyIntent() {
       NotificationOpenedProcessor_processFromContext(blankActivity, new Intent());
    }
-   
+
    @Test
    public void shouldOpenChromeTab() throws Exception {
       OneSignalInit();
       threadAndTaskWait();
-      
+
       assertTrue(ShadowCustomTabsClient.bindCustomTabsServiceCalled);
       assertTrue(ShadowCustomTabsSession.lastURL.toString().contains("https://onesignal.com/android_frame.html?app_id=b2f7f966-d8cc-11e4-bed1-df8f05be55ba&user_id=a2f7f967-e8cc-11e4-bed1-118f05be4511&ad_id=11111111-2222-3333-4444-555555555555&cbs_id="));
    }
-   
+
    @Test
    public void shouldHandleChromeNullNewSession() throws Exception {
       ShadowCustomTabsClient.nullNewSession = true;
       OneSignalInit();
       threadAndTaskWait();
    }
-   
+
    private OSPermissionStateChanges lastPermissionStateChanges;
    private boolean currentPermission;
    // Firing right away to match iOS behavior for wrapper SDKs.
@@ -2863,7 +3438,7 @@ public class MainOneSignalClassRunner {
    public void shouldFirePermissionObserverOnFirstAdd() throws Exception {
       OneSignalInit();
       threadAndTaskWait();
-      
+
       OSPermissionObserver permissionObserver = new OSPermissionObserver() {
          @Override
          public void onOSPermissionChanged(OSPermissionStateChanges stateChanges) {
@@ -2872,18 +3447,18 @@ public class MainOneSignalClassRunner {
          }
       };
       OneSignal.addPermissionObserver(permissionObserver);
-      
+
       assertFalse(lastPermissionStateChanges.getFrom().getEnabled());
       assertTrue(lastPermissionStateChanges.getTo().getEnabled());
       // Test to make sure object was correct at the time of firing.
       assertTrue(currentPermission);
    }
-   
+
    @Test
    public void shouldFirePermissionObserverWhenUserDisablesNotifications() throws Exception {
       OneSignalInit();
       threadAndTaskWait();
-      
+
       OSPermissionObserver permissionObserver = new OSPermissionObserver() {
          @Override
          public void onOSPermissionChanged(OSPermissionStateChanges stateChanges) {
@@ -2895,13 +3470,13 @@ public class MainOneSignalClassRunner {
       lastPermissionStateChanges = null;
       // Make sure garbage collection doesn't nuke any observers.
       Runtime.getRuntime().gc();
-      
+
       blankActivityController.pause();
       threadAndTaskWait();
       ShadowNotificationManagerCompat.enabled = false;
       blankActivityController.resume();
       threadAndTaskWait();
-      
+
       assertTrue(lastPermissionStateChanges.getFrom().getEnabled());
       assertFalse(lastPermissionStateChanges.getTo().getEnabled());
       // Test to make sure object was correct at the time of firing.
@@ -2909,16 +3484,16 @@ public class MainOneSignalClassRunner {
       // unsubscribeWhenNotificationsAreDisabled is not set so don't send notification_types.
       assertFalse(ShadowOneSignalRestClient.lastPost.has("notification_types"));
    }
-   
+
    @Test
    public void shouldSetNotificationTypesToZeroWhenUnsubscribeWhenNotificationsAreDisabledIsEnabled() throws Exception {
       ShadowNotificationManagerCompat.enabled = false;
       OneSignal.startInit(blankActivity).unsubscribeWhenNotificationsAreDisabled(true).init();
       OneSignal.init(blankActivity, "123456789", ONESIGNAL_APP_ID);
       threadAndTaskWait();
-      
+
       assertEquals(0, ShadowOneSignalRestClient.lastPost.getInt("notification_types"));
-      
+
       blankActivityController.pause();
       threadAndTaskWait();
       ShadowNotificationManagerCompat.enabled = true;
@@ -2926,31 +3501,31 @@ public class MainOneSignalClassRunner {
       threadAndTaskWait();
       assertEquals(1, ShadowOneSignalRestClient.lastPost.getInt("notification_types"));
    }
-   
+
    @Test
    @Config(shadows = {ShadowBadgeCountUpdater.class})
    public void shouldClearBadgesWhenPermissionIsDisabled() throws Exception {
       OneSignalInit();
       threadAndTaskWait();
       ShadowBadgeCountUpdater.lastCount = 1;
-   
+
       blankActivityController.pause();
       threadAndTaskWait();
       ShadowNotificationManagerCompat.enabled = false;
       blankActivityController.resume();
       threadAndTaskWait();
-      
+
       assertEquals(0, ShadowBadgeCountUpdater.lastCount);
    }
-   
-   
+
+
    private OSSubscriptionStateChanges lastSubscriptionStateChanges;
    private boolean currentSubscription;
    @Test
    public void shouldFireSubscriptionObserverOnFirstAdd() throws Exception {
       OneSignalInit();
       threadAndTaskWait();
-      
+
       OSSubscriptionObserver permissionObserver = new OSSubscriptionObserver() {
          @Override
          public void onOSSubscriptionChanged(OSSubscriptionStateChanges stateChanges) {
@@ -2959,18 +3534,18 @@ public class MainOneSignalClassRunner {
          }
       };
       OneSignal.addSubscriptionObserver(permissionObserver);
-      
+
       assertFalse(lastSubscriptionStateChanges.getFrom().getSubscribed());
       assertTrue(lastSubscriptionStateChanges.getTo().getSubscribed());
       // Test to make sure object was correct at the time of firing.
       assertTrue(currentSubscription);
    }
-   
+
    @Test
    public void shouldFireSubscriptionObserverWhenUserDisablesNotifications() throws Exception {
       OneSignalInit();
       threadAndTaskWait();
-   
+
       OSSubscriptionObserver subscriptionObserver = new OSSubscriptionObserver() {
          @Override
          public void onOSSubscriptionChanged(OSSubscriptionStateChanges stateChanges) {
@@ -2982,13 +3557,13 @@ public class MainOneSignalClassRunner {
       lastSubscriptionStateChanges = null;
       // Make sure garbage collection doesn't nuke any observers.
       Runtime.getRuntime().gc();
-      
+
       blankActivityController.pause();
       threadAndTaskWait();
       ShadowNotificationManagerCompat.enabled = false;
       blankActivityController.resume();
       threadAndTaskWait();
-      
+
       assertTrue(lastSubscriptionStateChanges.getFrom().getSubscribed());
       assertFalse(lastSubscriptionStateChanges.getTo().getSubscribed());
       // Test to make sure object was correct at the time of firing.
@@ -2996,7 +3571,7 @@ public class MainOneSignalClassRunner {
       // unsubscribeWhenNotificationsAreDisabled is not set so don't send notification_types.
       assertFalse(ShadowOneSignalRestClient.lastPost.has("notification_types"));
    }
-   
+
    @Test
    public void shouldFireSubscriptionObserverWhenChangesHappen() throws Exception {
       OneSignalInit();
@@ -3009,7 +3584,7 @@ public class MainOneSignalClassRunner {
       };
       OneSignal.addSubscriptionObserver(permissionObserver);
       threadAndTaskWait();
-      
+
       assertFalse(lastSubscriptionStateChanges.getFrom().getSubscribed());
       assertTrue(lastSubscriptionStateChanges.getTo().getSubscribed());
       // Test to make sure object was correct at the time of firing.
@@ -3018,7 +3593,7 @@ public class MainOneSignalClassRunner {
       assertEquals(ShadowPushRegistratorGCM.regId, lastSubscriptionStateChanges.getTo().getPushToken());
       assertEquals(ShadowOneSignalRestClient.pushUserId, lastSubscriptionStateChanges.getTo().getUserId());
    }
-   
+
    @Test
    public void shouldNotFireSubscriptionObserverWhenChangesHappenIfRemoved() throws Exception {
       OneSignalInit();
@@ -3033,7 +3608,7 @@ public class MainOneSignalClassRunner {
       lastSubscriptionStateChanges = null;
       OneSignal.removeSubscriptionObserver(permissionObserver);
       threadAndTaskWait();
-      
+
       assertFalse(currentSubscription);
       assertNull(lastSubscriptionStateChanges);
    }
@@ -3141,7 +3716,7 @@ public class MainOneSignalClassRunner {
       assertEquals("josh@onesignal.com", emailSubscriptionState.getEmailAddress());
       assertNotNull(emailSubscriptionState.getEmailUserId());
    }
-   
+
    @Test
    public void shouldReturnCorrectGetPermissionSubscriptionState() throws Exception {
       OneSignalInit();
@@ -3186,7 +3761,7 @@ public class MainOneSignalClassRunner {
       openPayload.put("title", "Test title");
       openPayload.put("alert", "Test Msg");
       openPayload.put("custom", new JSONObject("{ \"i\": \"UUID\" }"));
-      OneSignal.handleNotificationOpen(blankActivity, new JSONArray().put(openPayload), false);
+      OneSignal.handleNotificationOpen(blankActivity, new JSONArray().put(openPayload), false, ONESIGNAL_NOTIFICATION_ID);
 
       assertEquals("os_notification_opened", ShadowFirebaseAnalytics.lastEventString);
       Bundle expectedBundle = new Bundle();
@@ -3339,15 +3914,253 @@ public class MainOneSignalClassRunner {
    }
 
    @Test
+   public void sendExternalUserId_withCompletionHandler() throws Exception {
+      String testExternalId = "test_ext_id";
+
+      // 1. Init OneSignal
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // 2. Attempt to set external user id with callback
+      OneSignal.setExternalUserId(testExternalId, getExternalUserIdUpdateCompletionHandler());
+      threadAndTaskWait();
+
+      // 3. Make sure lastExternalUserIdResponse is equal to the expected response
+      JSONObject expectedExternalUserIdResponse = new JSONObject(
+              "{" +
+              "   \"push\" : {" +
+              "      \"success\" : true" +
+              "   }" +
+              "}"
+      );
+      assertEquals(expectedExternalUserIdResponse.toString(), lastExternalUserIdResponse.toString());
+   }
+
+    @Test
+    public void sendDifferentExternalUserId_withCompletionHandler() throws Exception {
+        String testExternalId = "test_ext_id_1";
+
+        // 1. Init OneSignal
+        OneSignalInit();
+        threadAndTaskWait();
+
+        // 2. Attempt to set external user id with callback
+        OneSignal.setExternalUserId(testExternalId, getExternalUserIdUpdateCompletionHandler());
+        threadAndTaskWait();
+
+       // 3. Make sure lastExternalUserIdResponse is equal to the expected response
+       JSONObject expectedExternalUserIdResponse = new JSONObject(
+               "{" +
+               "   \"push\" : {" +
+               "      \"success\" : true" +
+               "   }" +
+               "}"
+       );
+       assertEquals(expectedExternalUserIdResponse.toString(), lastExternalUserIdResponse.toString());
+
+        // 4. Change test external user id to send
+        testExternalId = "test_ext_id_2";
+
+        // 5. Attempt to set same exact external user id with callback
+        OneSignal.setExternalUserId(testExternalId, getExternalUserIdUpdateCompletionHandler());
+        threadAndTaskWait();
+
+       // 6. Make sure lastExternalUserIdResponse is equal to the expected response
+       assertEquals(expectedExternalUserIdResponse.toString(), lastExternalUserIdResponse.toString());
+    }
+
+   @Test
+   public void sendSameExternalUserId_withCompletionHandler() throws Exception {
+      String testExternalId = "test_ext_id";
+
+      // 1. Init OneSignal
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // 2. Attempt to set external user id with callback
+      OneSignal.setExternalUserId(testExternalId, getExternalUserIdUpdateCompletionHandler());
+      threadAndTaskWait();
+
+      // 3. Make sure lastExternalUserIdResponse is equal to the expected response
+      JSONObject expectedExternalUserIdResponse = new JSONObject(
+              "{" +
+              "   \"push\" : {" +
+              "      \"success\" : true" +
+              "   }" +
+              "}"
+      );
+      assertEquals(expectedExternalUserIdResponse.toString(), lastExternalUserIdResponse.toString());
+
+      // 4. Attempt to set same exact external user id with callback
+      OneSignal.setExternalUserId(testExternalId, getExternalUserIdUpdateCompletionHandler());
+      threadAndTaskWait();
+
+      // 5. Make sure lastExternalUserIdResponse is equal to the expected response
+      assertEquals(expectedExternalUserIdResponse.toString(), lastExternalUserIdResponse.toString());
+   }
+
+   @Test
+   public void sendExternalUserId_withFailure_withCompletionHandler() throws Exception {
+      String testExternalId = "test_ext_id";
+
+      // 1. Init OneSignal
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // 2. Attempt to set external user id with callback and force failure on the network requests
+      ShadowOneSignalRestClient.failAll = true;
+      OneSignal.setExternalUserId(testExternalId, getExternalUserIdUpdateCompletionHandler());
+      threadAndTaskWait();
+
+      // 3. Make sure lastExternalUserIdResponse is equal to the expected response
+      JSONObject expectedExternalUserIdResponse = new JSONObject(
+              "{" +
+              "   \"push\" : {" +
+              "      \"success\" : false" +
+              "   }" +
+              "}"
+      );
+      assertEquals(expectedExternalUserIdResponse.toString(), lastExternalUserIdResponse.toString());
+
+      // 4. Flip ShadowOneSignalRestClient.failAll flag back to false
+      ShadowOneSignalRestClient.failAll = false;
+
+      // 5. Attempt a second set external user id with callback
+      OneSignal.setExternalUserId(testExternalId, getExternalUserIdUpdateCompletionHandler());
+      threadAndTaskWait();
+
+      // 6. Make sure lastExternalUserIdResponse is equal to the expected response
+      expectedExternalUserIdResponse = new JSONObject(
+              "{" +
+              "   \"push\" : {" +
+              "      \"success\" : true" +
+              "   }" +
+              "}"
+      );
+      assertEquals(expectedExternalUserIdResponse.toString(), lastExternalUserIdResponse.toString());
+   }
+
+   @Test
+   public void sendExternalUserId_forPushAndEmail_withFailure_withCompletionHandler() throws Exception {
+      String testEmail = "test@onesignal.com";
+      String testExternalId = "test_ext_id";
+
+      // 1. Init OneSignal
+      OneSignalInit();
+      OneSignal.setEmail(testEmail);
+      threadAndTaskWait();
+
+      // 2. Attempt to set external user id with callback and force failure on the network requests
+      ShadowOneSignalRestClient.failAll = true;
+      OneSignal.setExternalUserId(testExternalId, getExternalUserIdUpdateCompletionHandler());
+      threadAndTaskWait();
+
+      // 3. Make sure lastExternalUserIdResponse has push and email with success : false
+      JSONObject expectedExternalUserIdResponse = new JSONObject(
+              "{" +
+              "   \"push\" : {" +
+              "      \"success\" : false" +
+              "   }," +
+              "   \"email\" : {" +
+              "      \"success\" : false" +
+              "   }" +
+              "}"
+      );
+      assertEquals(expectedExternalUserIdResponse.toString(), lastExternalUserIdResponse.toString());
+
+      // 4. Flip ShadowOneSignalRestClient.failAll flag back to false
+      ShadowOneSignalRestClient.failAll = false;
+
+      // 5. Attempt a second set external user id with callback
+      OneSignal.setExternalUserId(testExternalId, getExternalUserIdUpdateCompletionHandler());
+      threadAndTaskWait();
+
+      // 6. Make sure lastExternalUserIdResponse has push and email with success : true
+      expectedExternalUserIdResponse = new JSONObject(
+              "{" +
+              "   \"push\" : {" +
+              "      \"success\" : true" +
+              "   }," +
+              "   \"email\" : {" +
+              "      \"success\" : true" +
+              "   }" +
+              "}"
+      );
+      assertEquals(expectedExternalUserIdResponse.toString(), lastExternalUserIdResponse.toString());
+   }
+
+   @Test
+   public void sendExternalUserId_forPush_afterLoggingOutEmail_withCompletion() throws Exception {
+      String testEmail = "test@onesignal.com";
+      String testExternalId = "test_ext_id";
+
+      // 1. Init OneSignal and set email
+      OneSignalInit();
+      OneSignal.setEmail(testEmail);
+      threadAndTaskWait();
+
+      // 2. Logout Email
+      OneSignal.logoutEmail();
+      threadAndTaskWait();
+
+      // 4. Attempt a set external user id with callback
+      OneSignal.setExternalUserId(testExternalId, getExternalUserIdUpdateCompletionHandler());
+      threadAndTaskWait();
+
+      // 5. Make sure lastExternalUserIdResponse has push with success : true
+      JSONObject expectedExternalUserIdResponse = new JSONObject(
+              "{" +
+              "   \"push\" : {" +
+              "      \"success\" : true" +
+              "   }" +
+              "}"
+      );
+      assertEquals(expectedExternalUserIdResponse.toString(), lastExternalUserIdResponse.toString());
+   }
+
+   @Test
    public void testGetTagsQueuesCallbacks() throws Exception {
+      final BlockingQueue<Boolean> queue = new ArrayBlockingQueue<>(2);
 
       // Allows us to validate that both handlers get executed independently
       class DebugGetTagsHandler implements OneSignal.GetTagsHandler {
-         boolean executed = false;
-
          @Override
          public void tagsAvailable(JSONObject tags) {
-            executed = true;
+            queue.offer(true);
+         }
+      }
+
+      DebugGetTagsHandler first = new DebugGetTagsHandler();
+      DebugGetTagsHandler second = new DebugGetTagsHandler();
+
+      OneSignalInit();
+      threadAndTaskWait();
+
+      OneSignal.sendTag("test", "value");
+      threadAndTaskWait();
+
+      OneSignal.getTags(first);
+      OneSignal.getTags(second);
+      threadAndTaskWait();
+
+      assertTrue(queue.take());
+      assertTrue(queue.take());
+   }
+
+   @Test
+   public void testNestedGetTags() throws Exception {
+      final BlockingQueue<Boolean> queue = new ArrayBlockingQueue<>(2);
+
+      // Validates that nested getTags calls won't throw a ConcurrentModificationException
+      class DebugGetTagsHandler implements OneSignal.GetTagsHandler {
+         @Override
+         public void tagsAvailable(JSONObject tags) {
+            OneSignal.getTags(new OneSignal.GetTagsHandler() {
+               @Override
+               public void tagsAvailable(JSONObject tags) {
+                  queue.offer(true);
+               }
+            });
          }
       }
 
@@ -3359,13 +4172,40 @@ public class MainOneSignalClassRunner {
 
       DebugGetTagsHandler first = new DebugGetTagsHandler();
       DebugGetTagsHandler second = new DebugGetTagsHandler();
-
       OneSignal.getTags(first);
       OneSignal.getTags(second);
       threadAndTaskWait();
 
-      assertTrue(first.executed);
-      assertTrue(second.executed);
+      assertTrue(queue.take());
+      assertTrue(queue.take());
+   }
+
+   /**
+    * Created a AndroidManifest with 2 activities, 1 with the orientation config and 1 without
+    * Using this AndroidManifest setup to test that a config setting is detectable
+    */
+   @Test
+   public void testAndroidManifestConfigChangeFlags_orientationFlag() throws Exception {
+      OneSignalInit();
+      threadAndTaskWait();
+
+      // Set ActivityInfo.CONFIG_ORIENTATION configChanges flag
+      OneSignalShadowPackageManager.configChanges = ActivityInfo.CONFIG_ORIENTATION;
+
+      // Verify BlankActivity has orientation flag
+      boolean blankHasFlag = OneSignalPackagePrivateHelper.hasConfigChangeFlag(blankActivity, ActivityInfo.CONFIG_ORIENTATION);
+      assertTrue(blankHasFlag);
+
+      // Go to MainActivity
+      Intent mainIntent = new Intent(blankActivity, MainActivity.class);
+      Activity mainActivity = Robolectric.buildActivity(MainActivity.class).newIntent(mainIntent).create().get();
+
+      // Set no configChanges flags
+      OneSignalShadowPackageManager.configChanges = 0;
+
+      // Verify MainActivity has no orientation flag
+      boolean mainHasFlag = OneSignalPackagePrivateHelper.hasConfigChangeFlag(mainActivity, ActivityInfo.CONFIG_ORIENTATION);
+      assertFalse(mainHasFlag);
    }
 
    // ####### Unit test helper methods ########
@@ -3392,13 +4232,8 @@ public class MainOneSignalClassRunner {
       return osNotification;
    }
 
-   private static void threadAndTaskWait() throws Exception {
-      TestHelpers.threadAndTaskWait();
-   }
-
    private void OneSignalInit() {
       OneSignal.setLogLevel(OneSignal.LOG_LEVEL.DEBUG, OneSignal.LOG_LEVEL.NONE);
-      ShadowOSUtils.subscribableStatus = 1;
       OneSignal.init(blankActivity, "123456789", ONESIGNAL_APP_ID);
       blankActivityController.resume();
    }
@@ -3425,12 +4260,5 @@ public class MainOneSignalClassRunner {
       resolveInfo.activityInfo.name = "MainActivity";
 
       shadowOf(blankActivity.getPackageManager()).addResolveInfoForIntent(launchIntent, resolveInfo);
-   }
-
-   private static int sessionCountOffset = 1;
-   private static void restartAppAndElapseTimeToNextSession() {
-      flushBufferedSharedPrefs();
-      StaticResetHelper.restSetStaticFields();
-      ShadowSystemClock.setCurrentTimeMillis(System.currentTimeMillis() + 1_000 * 31 * sessionCountOffset++);
    }
 }

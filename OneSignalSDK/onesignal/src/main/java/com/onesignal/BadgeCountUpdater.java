@@ -38,6 +38,7 @@ import android.os.Bundle;
 import android.service.notification.StatusBarNotification;
 import android.support.annotation.RequiresApi;
 
+import com.onesignal.shortcutbadger.ShortcutBadgeException;
 import com.onesignal.shortcutbadger.ShortcutBadger;
 
 import com.onesignal.OneSignalDbContract.NotificationTable;
@@ -62,9 +63,9 @@ class BadgeCountUpdater {
          }
          else
             badgesEnabled = 1;
-      } catch (Throwable t) {
+      } catch (PackageManager.NameNotFoundException e) {
          badgesEnabled = 0;
-         OneSignal.Log(OneSignal.LOG_LEVEL.ERROR, "Error reading meta-data tag 'com.onesignal.BadgeCount'. Disabling badge setting.", t);
+         OneSignal.Log(OneSignal.LOG_LEVEL.ERROR, "Error reading meta-data tag 'com.onesignal.BadgeCount'. Disabling badge setting.", e);
       }
 
       return (badgesEnabled == 1);
@@ -86,8 +87,7 @@ class BadgeCountUpdater {
 
    @RequiresApi(api = Build.VERSION_CODES.M)
    private static void updateStandard(Context context) {
-      NotificationManager notifManager = (NotificationManager)context.getSystemService(Context.NOTIFICATION_SERVICE);
-      StatusBarNotification[] activeNotifs = notifManager.getActiveNotifications();
+      StatusBarNotification[] activeNotifs = OneSignalNotificationManager.getActiveNotifications(context);
 
       int runningCount = 0;
       for (StatusBarNotification activeNotif : activeNotifs) {
@@ -103,7 +103,7 @@ class BadgeCountUpdater {
       Cursor cursor = readableDb.query(
          NotificationTable.TABLE_NAME,
          null,
-         NotificationTable.recentUninteractedWithNotificationsWhere().toString(),
+         OneSignalDbHelper.recentUninteractedWithNotificationsWhere().toString(),
          null,                                                    // Where args
          null,                                                    // group by
          null,                                                    // filter by row groups
@@ -121,10 +121,13 @@ class BadgeCountUpdater {
       if (!areBadgeSettingsEnabled(context))
          return;
 
-      // Can throw if badges are not support on the device.
-      //  Or app does not have a default launch Activity.
       try {
          ShortcutBadger.applyCountOrThrow(context, count);
-      } catch(Throwable t) {}
+      } catch (ShortcutBadgeException e) {
+         // Suppress error as there are normal cases where this will throw
+         // Can throw if:
+         //    - Badges are not support on the device.
+         //    - App does not have a default launch Activity.
+      }
    }
 }

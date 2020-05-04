@@ -8,6 +8,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -15,8 +16,8 @@ public class StaticResetHelper {
 
    private static Collection<ClassState> classes = new ArrayList<>();
 
-   static {
-      classes.add(new StaticResetHelper().new ClassState(OneSignal.class, new OtherFieldHandler() {
+   public static void load() {
+      classes.add(new ClassState(OneSignal.class, new OtherFieldHandler() {
          @Override
          public boolean onOtherField(Field field) throws Exception {
             if (field.getName().equals("unprocessedOpenedNotifis")) {
@@ -27,7 +28,7 @@ public class StaticResetHelper {
          }
       }));
 
-      classes.add(new StaticResetHelper().new ClassState(OneSignalStateSynchronizer.class, new OtherFieldHandler() {
+      classes.add(new ClassState(OneSignalStateSynchronizer.class, new OtherFieldHandler() {
          @Override
          public boolean onOtherField(Field field) throws Exception {
             if (field.getName().equals("userStatePushSynchronizer") || field.getName().equals("userStateEmailSynchronizer")) {
@@ -38,19 +39,34 @@ public class StaticResetHelper {
          }
       }));
       
-      classes.add(new StaticResetHelper().new ClassState(OneSignalChromeTab.class, null));
-      classes.add(new StaticResetHelper().new ClassState(OneSignalDbHelper.class, null));
-      classes.add(new StaticResetHelper().new ClassState(LocationGMS.class, null));
+      classes.add(new ClassState(OneSignalChromeTabAndroidFrame.class, null));
+      classes.add(new ClassState(OneSignalDbHelper.class, null));
+      classes.add(new ClassState(LocationGMS.class, null));
+      classes.add(new ClassState(OSInAppMessageController.class, null));
+      classes.add(new ClassState(ActivityLifecycleListener.class, null));
+      classes.add(new ClassState(OSDynamicTriggerController.class, new OtherFieldHandler() {
+         @Override
+         public boolean onOtherField(Field field) throws Exception {
+            if (field.getName().equals("sessionLaunchTime")) {
+               field.set(null, new Date());
+               return true;
+            }
+            return false;
+         }
+      }));
+      classes.add(new ClassState(FocusTimeController.class, null));
+      classes.add(new ClassState(OSSessionManager.class, null));
+      classes.add(new ClassState(MockSessionManager.class, null));
    }
 
    private interface OtherFieldHandler {
       boolean onOtherField(Field field) throws Exception;
    }
 
-   private class ClassState {
+   static private class ClassState {
       private OtherFieldHandler otherFieldHandler;
       private Class stateClass;
-      private Map<Field, Object> orginalVals = new HashMap<Field, Object>();
+      private Map<Field, Object> orginalVals = new HashMap<>();
 
       ClassState(Class inClass, OtherFieldHandler inOtherFieldHandler) {
          stateClass = inClass;
@@ -58,58 +74,54 @@ public class StaticResetHelper {
       }
 
       private Object tryClone(Object v) throws Exception {
-         if (v instanceof Cloneable)
+         if (v instanceof Cloneable
+                 && !Modifier.isFinal(v.getClass().getModifiers()))
             return v.getClass().getMethod("clone").invoke(v);
          return v;
       }
 
       private void saveStaticValues() throws Exception {
          Field[] allFields = stateClass.getDeclaredFields();
-         try {
-            for (Field field : allFields) {
-               int fieldModifiers = field.getModifiers();
-               if (Modifier.isStatic(fieldModifiers)
-                   && !Modifier.isFinal(fieldModifiers)) {
-                  field.setAccessible(true);
-                  Object value = tryClone(field.get(null));
-                  orginalVals.put(field, value);
-               }
+         for (Field field : allFields) {
+            int fieldModifiers = field.getModifiers();
+            if (Modifier.isStatic(fieldModifiers)
+                && !Modifier.isFinal(fieldModifiers)) {
+               field.setAccessible(true);
+               Object value = tryClone(field.get(null));
+               orginalVals.put(field, value);
             }
-         } catch (IllegalAccessException e) {
-            System.err.println(e);
          }
       }
 
       private void restSetStaticFields() throws Exception {
+         // appContext is manually set to null first since so many things depend on it.
+         OneSignal.appContext = null;
          for (Map.Entry<Field, Object> entry : orginalVals.entrySet()) {
             Field field = entry.getKey();
-            Object value = entry.getValue();
-            field.getName();
             field.setAccessible(true);
 
+            Object value = entry.getValue();
             if (otherFieldHandler == null || !otherFieldHandler.onOtherField(field))
                field.set(null, tryClone(value));
          }
       }
    }
 
-   public static void saveStaticValues() {
-      for(ClassState aClass : classes) {
-         try {
-            aClass.saveStaticValues();
-         } catch (Exception e) {
-            e.printStackTrace();
-         }
-      }
+   public static void saveStaticValues() throws Exception {
+      for(ClassState aClass : classes)
+         aClass.saveStaticValues();
    }
 
-   public static void restSetStaticFields() {
-      for(ClassState aClass : classes) {
-         try {
+   public static void restSetStaticFields() throws Exception {
+      for(ClassState aClass : classes)
             aClass.restSetStaticFields();
-         } catch (Exception e) {
-            e.printStackTrace();
-         }
-      }
+
+      clearWebViewManger();
+   }
+
+   private static void clearWebViewManger() throws NoSuchFieldException, IllegalAccessException {
+      Field field = WebViewManager.class.getDeclaredField("lastInstance");
+      field.setAccessible(true);
+      field.set(null, null);
    }
 }

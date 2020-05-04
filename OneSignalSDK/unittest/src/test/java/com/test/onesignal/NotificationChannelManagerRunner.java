@@ -7,6 +7,7 @@ import android.app.NotificationManager;
 import android.content.Context;
 
 import com.onesignal.ShadowOSUtils;
+import com.onesignal.ShadowOneSignal;
 import com.onesignal.ShadowRoboNotificationManager;
 import com.onesignal.example.BlankActivity;
 
@@ -23,21 +24,25 @@ import org.robolectric.android.controller.ActivityController;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowLog;
 
+import java.math.BigInteger;
+
 import static com.onesignal.OneSignalPackagePrivateHelper.NotificationChannelManager_createNotificationChannel;
 import static com.onesignal.OneSignalPackagePrivateHelper.NotificationChannelManager_processChannelList;
-import static org.junit.Assert.assertFalse;
 import static junit.framework.TestCase.assertTrue;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 
 @Config(packageName = "com.onesignal.example",
-      shadows = {
-         ShadowOSUtils.class,
-         ShadowRoboNotificationManager.class},
-      instrumentedPackages = {"com.onesignal"},
-      sdk = 26)
+        instrumentedPackages = { "com.onesignal" },
+        shadows = {
+            ShadowOSUtils.class,
+            ShadowRoboNotificationManager.class},
+         sdk = 26
+)
+
 @RunWith(RobolectricTestRunner.class)
 public class NotificationChannelManagerRunner {
 
@@ -56,14 +61,14 @@ public class NotificationChannelManagerRunner {
    }
 
    @Before
-   public void beforeEachTest() throws Exception {
+   public void beforeEachTest() {
       ActivityController<BlankActivity> blankActivityController = Robolectric.buildActivity(BlankActivity.class).create();
       blankActivity = blankActivityController.get();
       mContext = blankActivity;
    }
 
    @Test
-   public void createNotificationChannelShouldReturnDefaultChannelWithEmptyPayload() throws Exception {
+   public void createNotificationChannelShouldReturnDefaultChannelWithEmptyPayload() {
       JSONObject payload = new JSONObject();
 
       String ret = NotificationChannelManager_createNotificationChannel(blankActivity, payload);
@@ -163,11 +168,11 @@ public class NotificationChannelManagerRunner {
    // Start - Cold start sync tests
    
    @Test
-   public void processPayloadWithOutChannelList() throws Exception {
+   public void processPayloadWithOutChannelList() {
       createChannel("local_existing_id");
       createChannel("OS_existing_id");
    
-      NotificationChannelManager_processChannelList(blankActivity, new JSONObject());
+      NotificationChannelManager_processChannelList(blankActivity, null);
       
       assertNotNull(getChannel("local_existing_id"));
       assertNotNull(getChannel("OS_existing_id"));
@@ -185,10 +190,8 @@ public class NotificationChannelManagerRunner {
       channelItem.put("chnl", channelItemChnl);
    
       channelList.put(channelItem);
-      JSONObject payload = new JSONObject();
-      payload.put("chnl_lst", channelList);
       
-      NotificationChannelManager_processChannelList(blankActivity, payload);
+      NotificationChannelManager_processChannelList(blankActivity, channelList);
       
       assertNotNull(getChannel("local_existing_id"));
       assertNotNull(getChannel("OS_id1"));
@@ -196,7 +199,7 @@ public class NotificationChannelManagerRunner {
    
    @Test
    public void processPayloadDeletingOldChannel() throws Exception {
-      NotificationChannelManager_processChannelList(blankActivity, createBasicChannelListPayload());
+      NotificationChannelManager_processChannelList(blankActivity, createBasicChannelListPayload().optJSONArray("chnl_lst"));
       assertChannelsForBasicChannelList();
    }
    
@@ -221,12 +224,32 @@ public class NotificationChannelManagerRunner {
       
       channelProperties.put("grp_id", "grp_id1");
    
-      NotificationChannelManager_processChannelList(blankActivity, payload);
+      NotificationChannelManager_processChannelList(blankActivity, payload.optJSONArray("chnl_lst"));
       
       NotificationChannel channel = getChannel("OS_id1");
       assertEquals("en_nm", channel.getName());
       assertEquals("en_dscr", channel.getDescription());
       assertEquals("en_grp_nm", ShadowRoboNotificationManager.lastChannelGroup.getName());
+   }
+
+   @Test
+   @Config(shadows = {ShadowOneSignal.class})
+   public void handleInvalidColorCode() throws Exception {
+      JSONObject payload = new JSONObject();
+      JSONObject chnl = new JSONObject();
+
+      chnl.put("id", "test_id");
+      chnl.put("nm", "Test Name");
+      payload.put("ledc", "FFFFFFFFY");
+      payload.put("chnl", chnl.toString());
+
+      NotificationChannelManager_createNotificationChannel(blankActivity, payload);
+
+      // check default to white
+      NotificationChannel channel = ShadowRoboNotificationManager.lastChannel;
+      BigInteger ledColor = new BigInteger("FFFFFFFF", 16);
+      assertEquals(ledColor.intValue(), channel.getLightColor());
+      assertTrue(ShadowOneSignal.messages.contains("OneSignal LED Color Settings: ARGB Hex value incorrect format (E.g: FF9900FF)"));
    }
    
    // Starting helper methods
