@@ -17,6 +17,7 @@
     <string name="add_tag">Add Tag</string>
 
     <string name="push_notification">Push Notifications</string>
+    <string name="onesignal_app_id">e84457ce-14f4-4cf0-9f8b-85c161eda1c3</string>
 
     <string name="outcomes">Outcome Events</string>
     <string name="current_session">App Session:</string>
